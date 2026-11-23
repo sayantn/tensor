@@ -3,7 +3,6 @@ name        = "tensor-benches"
 version     = "0.0.0"
 edition     = "2024"
 publish     = false
-autobenches = false
 
 [features]
 matrixmultiply-constconf = ["tensor/matrixmultiply-constconf"]
@@ -23,10 +22,8 @@ criterion = "0.8.2"
 
 [[bench]]
 name    = "gemm"
-path    = "gemm.rs"
 harness = false
 
 [[bench]]
 name    = "linalg"
-path    = "linalg.rs"
 harness = false

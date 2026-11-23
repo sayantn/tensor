@@ -5,7 +5,7 @@ edition     = "2024"
 autobenches = false
 
 [workspace]
-members = [".", "benches"]
+members = [".", "bench"]
 
 [features]
 default = ["gemm-x86-v4"]

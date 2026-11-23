@@ -25,8 +25,6 @@
     clippy::suboptimal_flops,
     clippy::missing_const_for_fn,
     clippy::missing_inline_in_public_items,
-    // clippy::allow_attributes,
-    // clippy::allow_attributes_without_reason,
     clippy::dbg_macro,
     clippy::todo,
     clippy::unimplemented
@@ -131,6 +129,13 @@ fn linear_offset<const N: usize>(shape: &[usize; N], index: &[usize; N]) -> usiz
 }
 
 #[inline]
+fn linear_offset_checked<const N: usize>(shape: &[usize; N], index: &[usize; N]) -> Option<usize> {
+    zip(shape, index).try_fold(0, |offset, (&len, &idx)| {
+        (idx < len).then_some(offset * len + idx)
+    })
+}
+
+#[inline]
 fn resolve_range<R: RangeBounds<usize>>(range: R, axis_len: usize) -> Range<usize> {
     let start = match range.start_bound() {
         Bound::Included(&s) => s,
@@ -220,7 +225,7 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
 
     /// Flattens the view into a 1D [`VectorView`] of length `self.len()`.
     #[inline]
-    pub const fn flatten(self) -> TensorView<'a, T, 1> {
+    pub const fn flatten(self) -> VectorView<'a, T> {
         TensorView {
             data: self.data,
             shape: [self.len()],
@@ -235,7 +240,7 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     /// Panics at compile time if `N == 0`, or at runtime if `range` resolves
     /// to an empty range or exceeds `self.shape()[0]`.
     #[inline]
-    pub fn slice<R: RangeBounds<usize>>(self, range: R) -> TensorView<'a, T, N> {
+    pub fn slice<R: RangeBounds<usize>>(self, range: R) -> Self {
         const {
             assert!(N >= 1, "cannot slice a 0D scalar tensor");
         }
@@ -253,6 +258,49 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
         }
     }
 
+    /// Splits the view into two non-empty sub-views along the outermost axis
+    /// (`axis 0`) at `position`.
+    ///
+    /// The first view covers `0..position` and the second covers
+    /// `position..self.shape()[0]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics at compile time if `N == 0`, or at runtime if `position == 0`
+    /// or `position >= self.shape()[0]` (since zero-sized dimensions are
+    /// disallowed).
+    #[inline]
+    pub fn split_at(self, position: usize) -> (Self, Self) {
+        const {
+            assert!(N >= 1, "cannot split a 0D scalar tensor");
+        }
+        assert!(position > 0 && position < self.shape[0]);
+
+        let mut shape1 = self.shape;
+        shape1[0] = position;
+
+        let mut shape2 = self.shape;
+        shape2[0] -= position;
+
+        // SAFETY: `position < self.shape[0]` and `self.data.len() == self.shape[0] * inner`,
+        // so `position * inner` is strictly within `self.data`.
+        let (data1, data2) = unsafe {
+            self.data
+                .split_at_unchecked(position * shape_len(&self.shape[1..]))
+        };
+
+        (
+            Self {
+                data: data1,
+                shape: shape1,
+            },
+            Self {
+                data: data2,
+                shape: shape2,
+            },
+        )
+    }
+
     /// Partitions the tensor along its leading axes into contiguous sub-views
     /// of rank `M` (spanning the trailing `M` dimensions).
     ///
@@ -268,7 +316,11 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
             assert!(M <= N, "chunk rank M cannot exceed tensor rank N");
         }
         let sub_shape = array::from_fn(|i| self.shape[N - M + i]);
-        let chunk_len = shape_len(&sub_shape);
+        let chunk_len = if M == N {
+            self.len()
+        } else {
+            shape_len(&sub_shape)
+        };
         self.data
             .chunks_exact(chunk_len)
             .map(move |chunk| TensorView {
@@ -285,16 +337,16 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     {
         Tensor::from_vec(self.data.to_vec(), self.shape)
     }
-}
 
-impl<'a, T> TensorView<'a, T, 0> {
-    /// Creates a 0-dimensional [`ScalarView`] borrowing a single reference.
+    /// Returns a reference to the element at `index`, or `None` if any
+    /// coordinate is out of bounds.
     #[inline]
-    pub const fn scalar(val: &'a T) -> Self {
-        Self {
-            data: slice::from_ref(val),
-            shape: [],
-        }
+    #[must_use]
+    pub fn get(self, index: [usize; N]) -> Option<&'a T> {
+        let off = linear_offset_checked(&self.shape, &index)?;
+        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
+        // and `self.data.len()` equals the product of `self.shape`.
+        Some(unsafe { self.data.get_unchecked(off) })
     }
 }
 
@@ -368,14 +420,6 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     #[must_use]
     pub const fn as_mut_ptr(&mut self) -> *mut T {
         self.data.as_mut_ptr()
-    }
-
-    /// Consumes the view and returns the underlying immutable slice with
-    /// lifetime `'a`.
-    #[inline]
-    #[must_use]
-    pub const fn into_slice(self) -> &'a [T] {
-        self.data
     }
 
     /// Consumes the view and returns the underlying mutable slice with
@@ -457,7 +501,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         let tail = &self.shape[N - M..];
         assert_eq!(tail, src.shape(), "assign shape mismatch");
         let src_slice = src.as_slice();
-        for mut chunk in self.view_mut().chunks_mut::<M>() {
+        for mut chunk in self.view_mut().chunks::<M>() {
             chunk.as_mut_slice().copy_from_slice(src_slice);
         }
     }
@@ -481,9 +525,9 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     /// Consumes and flattens the view into a 1D [`VectorViewMut`] of length
     /// `self.len()`.
     #[inline]
-    pub const fn flatten(self) -> TensorViewMut<'a, T, 1> {
+    pub const fn flatten(self) -> VectorViewMut<'a, T> {
         TensorViewMut {
-            shape: [self.data.len()],
+            shape: [self.len()],
             data: self.data,
         }
     }
@@ -496,7 +540,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     /// Panics at compile time if `N == 0`, or at runtime if `range` resolves
     /// to an empty range or exceeds `self.shape()[0]`.
     #[inline]
-    pub fn slice<R: RangeBounds<usize>>(self, range: R) -> TensorViewMut<'a, T, N> {
+    pub fn slice<R: RangeBounds<usize>>(self, range: R) -> Self {
         const {
             assert!(N >= 1, "cannot slice a 0D scalar tensor");
         }
@@ -510,13 +554,57 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         // SAFETY: `r.end <= self.shape[0]` and `self.data.len() == self.shape[0] * inner`,
         // so `start..end` is strictly within `self.data`.
         let new_data = unsafe { self.data.get_unchecked_mut(start..end) };
-        TensorViewMut {
+        Self {
             data: new_data,
             shape: new_shape,
         }
     }
 
-    /// Consumes and partitions the tensor into immutable sub-views of rank `M`
+    /// Consumes the mutable view and splits it into two non-empty,
+    /// non-overlapping mutable sub-views along the outermost axis (`axis 0`)
+    /// at `position`.
+    ///
+    /// The first view covers `0..position` and the second covers
+    /// `position..self.shape()[0]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics at compile time if `N == 0`, or at runtime if `position == 0`
+    /// or `position >= self.shape()[0]` (since zero-sized dimensions are
+    /// disallowed).
+    #[inline]
+    pub fn split_at(self, position: usize) -> (Self, Self) {
+        const {
+            assert!(N >= 1, "cannot split a 0D scalar tensor");
+        }
+        assert!(position > 0 && position < self.shape[0]);
+
+        let mut shape1 = self.shape;
+        shape1[0] = position;
+
+        let mut shape2 = self.shape;
+        shape2[0] -= position;
+
+        // SAFETY: `position < self.shape[0]` and `self.data.len() == self.shape[0] * inner`,
+        // so `position * inner` is strictly within `self.data`.
+        let (data1, data2) = unsafe {
+            self.data
+                .split_at_mut_unchecked(position * shape_len(&self.shape[1..]))
+        };
+
+        (
+            Self {
+                data: data1,
+                shape: shape1,
+            },
+            Self {
+                data: data2,
+                shape: shape2,
+            },
+        )
+    }
+
+    /// Consumes and partitions the mutable view into mutable sub-views of rank `M`
     /// spanning the trailing `M` dimensions.
     ///
     /// # Panics
@@ -525,27 +613,17 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     #[inline]
     pub fn chunks<const M: usize>(
         self,
-    ) -> impl ExactSizeIterator<Item = TensorView<'a, T, M>> + DoubleEndedIterator + FusedIterator
-    {
-        self.into_view().chunks::<M>()
-    }
-
-    /// Consumes and partitions the tensor into mutable sub-views of rank `M`
-    /// spanning the trailing `M` dimensions.
-    ///
-    /// # Panics
-    ///
-    /// Panics at compile time if `M > N`.
-    #[inline]
-    pub fn chunks_mut<const M: usize>(
-        self,
     ) -> impl ExactSizeIterator<Item = TensorViewMut<'a, T, M>> + DoubleEndedIterator + FusedIterator
     {
         const {
             assert!(M <= N, "chunk rank M cannot exceed tensor rank N");
         }
         let sub_shape = array::from_fn(|i| self.shape[N - M + i]);
-        let chunk_len = shape_len(&sub_shape);
+        let chunk_len = if M == N {
+            self.len()
+        } else {
+            shape_len(&sub_shape)
+        };
         self.data
             .chunks_exact_mut(chunk_len)
             .map(move |chunk| TensorViewMut {
@@ -562,17 +640,27 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     {
         self.view().to_tensor()
     }
-}
 
-impl<'a, T> TensorViewMut<'a, T, 0> {
-    /// Creates a 0-dimensional [`ScalarViewMut`] borrowing a single mutable
-    /// reference.
+    /// Returns a reference to the element at `index`, or `None` if any
+    /// coordinate is out of bounds.
     #[inline]
-    pub const fn scalar(val: &'a mut T) -> Self {
-        Self {
-            data: slice::from_mut(val),
-            shape: [],
-        }
+    #[must_use]
+    pub fn get(&self, index: [usize; N]) -> Option<&T> {
+        let off = linear_offset_checked(&self.shape, &index)?;
+        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
+        // and `self.data.len()` equals the product of `self.shape`.
+        Some(unsafe { self.data.get_unchecked(off) })
+    }
+
+    /// Returns a mutable reference to the element at `index`, or `None` if any
+    /// coordinate is out of bounds.
+    #[inline]
+    #[must_use]
+    pub fn get_mut(&mut self, index: [usize; N]) -> Option<&mut T> {
+        let off = linear_offset_checked(&self.shape, &index)?;
+        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
+        // and `self.data.len()` equals the product of `self.shape`.
+        Some(unsafe { self.data.get_unchecked_mut(off) })
     }
 }
 
@@ -683,12 +771,14 @@ impl<T, const N: usize> Tensor<T, N> {
 
     /// Returns the underlying row-major data as a mutable flat slice.
     #[inline]
+    #[must_use]
     pub const fn as_mut_slice(&mut self) -> &mut [T] {
         &mut self.data
     }
 
     /// Returns a raw mutable pointer to the first element in the tensor.
     #[inline]
+    #[must_use]
     pub const fn as_mut_ptr(&mut self) -> *mut T {
         self.data.as_mut_ptr()
     }
@@ -764,62 +854,36 @@ impl<T, const N: usize> Tensor<T, N> {
         }
     }
 
-    /// Borrows an immutable sub-view sliced along `axis 0` by `range`.
-    ///
-    /// # Panics
-    ///
-    /// Panics at compile time if `N == 0`, or at runtime if `range` resolves
-    /// to an empty range or exceeds `self.shape()[0]`.
+    /// Consumes and flattens the tensor into a 1D [`Vector`] of length
+    /// `self.len()`.
     #[inline]
-    pub fn slice<R: RangeBounds<usize>>(&self, range: R) -> TensorView<'_, T, N> {
-        self.view().slice(range)
+    pub fn flatten(self) -> Vector<T> {
+        Tensor {
+            shape: [self.len()],
+            data: self.data,
+        }
     }
 
-    /// Borrows a mutable sub-view sliced along `axis 0` by `range`.
-    ///
-    /// # Panics
-    ///
-    /// Panics at compile time if `N == 0`, or at runtime if `range` resolves
-    /// to an empty range or exceeds `self.shape()[0]`.
+    /// Returns a reference to the element at `index`, or `None` if any
+    /// coordinate is out of bounds.
     #[inline]
-    pub fn slice_mut<R: RangeBounds<usize>>(&mut self, range: R) -> TensorViewMut<'_, T, N> {
-        self.view_mut().slice(range)
+    #[must_use]
+    pub fn get(&self, index: [usize; N]) -> Option<&T> {
+        let off = linear_offset_checked(&self.shape, &index)?;
+        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
+        // and `self.data.len()` equals the product of `self.shape`.
+        Some(unsafe { self.data.get_unchecked(off) })
     }
 
-    /// Returns an iterator over immutable sub-views of rank `M` spanning the
-    /// trailing `M` dimensions.
-    ///
-    /// # Panics
-    ///
-    /// Panics at compile time if `M > N`.
+    /// Returns a mutable reference to the element at `index`, or `None` if any
+    /// coordinate is out of bounds.
     #[inline]
-    pub fn chunks<const M: usize>(
-        &self,
-    ) -> impl ExactSizeIterator<Item = TensorView<'_, T, M>> + DoubleEndedIterator + FusedIterator
-    {
-        self.view().chunks::<M>()
-    }
-
-    /// Returns an iterator over mutable sub-views of rank `M` spanning the
-    /// trailing `M` dimensions.
-    ///
-    /// # Panics
-    ///
-    /// Panics at compile time if `M > N`.
-    #[inline]
-    pub fn chunks_mut<const M: usize>(
-        &mut self,
-    ) -> impl ExactSizeIterator<Item = TensorViewMut<'_, T, M>> + DoubleEndedIterator + FusedIterator
-    {
-        self.view_mut().chunks_mut::<M>()
-    }
-}
-
-impl<T> Tensor<T, 0> {
-    /// Creates an owned 0-dimensional [`Scalar`] tensor containing `val`.
-    #[inline]
-    pub fn scalar(val: T) -> Self {
-        Self::from_vec(vec![val], [])
+    #[must_use]
+    pub fn get_mut(&mut self, index: [usize; N]) -> Option<&mut T> {
+        let off = linear_offset_checked(&self.shape, &index)?;
+        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
+        // and `self.data.len()` equals the product of `self.shape`.
+        Some(unsafe { self.data.get_unchecked_mut(off) })
     }
 }
 
@@ -947,7 +1011,7 @@ macro_rules! impl_assign_ops {
                 let tail = &self.shape[N - M..];
                 assert_eq!(tail, &rhs.shape()[..], "broadcast shape mismatch");
                 let rhs_slice = rhs.as_slice();
-                for mut chunk in self.view_mut().chunks_mut::<M>() {
+                for mut chunk in self.view_mut().chunks::<M>() {
                     for (a, &b) in zip(chunk.as_mut_slice(), rhs_slice) {
                         *a $op b;
                     }
@@ -961,6 +1025,15 @@ macro_rules! impl_assign_ops {
             #[inline]
             fn $method(&mut self, rhs: &Tensor<T, M>) {
                 self.$method(rhs.view());
+            }
+        }
+
+        impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&TensorView<'_, T, M>>
+            for TensorViewMut<'_, T, N>
+        {
+            #[inline]
+            fn $method(&mut self, rhs: &TensorView<'_, T, M>) {
+                self.$method(*rhs);
             }
         }
 
@@ -997,6 +1070,15 @@ macro_rules! impl_assign_ops {
             #[inline]
             fn $method(&mut self, rhs: &Tensor<T, M>) {
                 self.$method(rhs.view());
+            }
+        }
+
+        impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&TensorView<'_, T, M>>
+            for Tensor<T, N>
+        {
+            #[inline]
+            fn $method(&mut self, rhs: &TensorView<'_, T, M>) {
+                self.$method(*rhs);
             }
         }
 
@@ -1085,7 +1167,7 @@ impl<T: Display, const N: usize> Display for Tensor<T, N> {
 }
 
 // ============================================================================
-// Aliases
+// Aliases & Rank-Specific Helpers
 // ============================================================================
 
 /// Owned 0-dimensional scalar tensor.
@@ -1108,6 +1190,61 @@ pub type Matrix<T> = Tensor<T, 2>;
 pub type MatrixView<'a, T> = TensorView<'a, T, 2>;
 /// Mutable 2-dimensional matrix view.
 pub type MatrixViewMut<'a, T> = TensorViewMut<'a, T, 2>;
+
+impl<'a, T> ScalarView<'a, T> {
+    /// Creates a 0-dimensional [`ScalarView`] borrowing a single reference.
+    #[inline]
+    pub const fn scalar(val: &'a T) -> Self {
+        Self {
+            data: slice::from_ref(val),
+            shape: [],
+        }
+    }
+
+    /// Consumes the view and returns the underlying immutable scalar reference.
+    #[inline]
+    #[must_use]
+    pub const fn into_scalar(self) -> &'a T {
+        // SAFETY: A rank-0 `ScalarView` has shape `[]`, which guarantees `self.data.len() == 1`.
+        unsafe { &*self.data.as_ptr() }
+    }
+}
+
+impl<'a, T> ScalarViewMut<'a, T> {
+    /// Creates a 0-dimensional [`ScalarViewMut`] borrowing a single mutable
+    /// reference.
+    #[inline]
+    pub const fn scalar(val: &'a mut T) -> Self {
+        Self {
+            data: slice::from_mut(val),
+            shape: [],
+        }
+    }
+
+    /// Consumes the view and returns the underlying mutable scalar reference.
+    #[inline]
+    #[must_use]
+    pub const fn into_scalar(self) -> &'a mut T {
+        // SAFETY: A rank-0 `ScalarViewMut` has shape `[]`, which guarantees `self.data.len() == 1`.
+        unsafe { &mut *self.data.as_mut_ptr() }
+    }
+}
+
+impl<T> Scalar<T> {
+    /// Creates an owned 0-dimensional [`Scalar`] tensor containing `val`.
+    #[inline]
+    pub fn scalar(val: T) -> Self {
+        Self::from_vec(vec![val], [])
+    }
+
+    /// Consumes the scalar tensor and returns its single inner element.
+    #[inline]
+    #[must_use]
+    pub fn into_scalar(self) -> T {
+        // SAFETY: A rank-0 `Scalar` has shape `[]`, which guarantees `self.data.len() == 1`.
+        unsafe { self.data.into_vec().pop().unwrap_unchecked() }
+    }
+}
 
 impl<T> Matrix<T> {
     /// Returns the number of rows (`shape()[0]`) in the matrix.
@@ -1154,5 +1291,87 @@ impl<T> MatrixViewMut<'_, T> {
     #[must_use]
     pub const fn ncols(&self) -> usize {
         self.shape[1]
+    }
+}
+
+// ============================================================================
+// Conversions & Standard Trait Impls
+// ============================================================================
+
+impl<T> From<Vec<T>> for Vector<T> {
+    #[inline]
+    fn from(value: Vec<T>) -> Self {
+        let len = value.len();
+        Self::from_vec(value, [len])
+    }
+}
+
+impl<T, const N: usize> From<Tensor<T, N>> for Vec<T> {
+    #[inline]
+    fn from(value: Tensor<T, N>) -> Self {
+        value.into_vec()
+    }
+}
+
+impl<'a, T, const N: usize> From<&'a Tensor<T, N>> for TensorView<'a, T, N> {
+    #[inline]
+    fn from(value: &'a Tensor<T, N>) -> Self {
+        value.view()
+    }
+}
+
+impl<'a, T, const N: usize> From<&'a mut Tensor<T, N>> for TensorViewMut<'a, T, N> {
+    #[inline]
+    fn from(value: &'a mut Tensor<T, N>) -> Self {
+        value.view_mut()
+    }
+}
+
+impl<'a, T, const N: usize> From<TensorViewMut<'a, T, N>> for TensorView<'a, T, N> {
+    #[inline]
+    fn from(value: TensorViewMut<'a, T, N>) -> Self {
+        value.into_view()
+    }
+}
+
+impl<T, const N: usize> AsRef<[T]> for TensorView<'_, T, N> {
+    #[inline]
+    fn as_ref(&self) -> &[T] {
+        self.as_slice()
+    }
+}
+
+impl<T, const N: usize> AsRef<[T]> for TensorViewMut<'_, T, N> {
+    #[inline]
+    fn as_ref(&self) -> &[T] {
+        self.as_slice()
+    }
+}
+
+impl<T, const N: usize> AsRef<[T]> for Tensor<T, N> {
+    #[inline]
+    fn as_ref(&self) -> &[T] {
+        self.as_slice()
+    }
+}
+
+impl<T, const N: usize> AsMut<[T]> for TensorViewMut<'_, T, N> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut [T] {
+        self.as_mut_slice()
+    }
+}
+
+impl<T, const N: usize> AsMut<[T]> for Tensor<T, N> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut [T] {
+        self.as_mut_slice()
+    }
+}
+
+impl<T: Default> Default for Scalar<T> {
+    #[inline]
+    fn default() -> Self {
+        Scalar::scalar(T::default())
     }
 }

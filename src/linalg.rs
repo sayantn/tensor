@@ -1,7 +1,7 @@
 //! BLAS-style Level-1, Level-2, and Level-3 dense linear algebra routines over
 //! [`VectorView`], [`VectorViewMut`], [`MatrixView`], and [`MatrixViewMut`].
 
-use crate::{MatrixView, MatrixViewMut, VectorView, VectorViewMut};
+use crate::{MatrixView, MatrixViewMut, TensorView, TensorViewMut, VectorView, VectorViewMut};
 
 use core::iter::zip;
 use core::ops::{Add, AddAssign, Mul, MulAssign};
@@ -31,17 +31,6 @@ pub enum MatrixOp {
     Trans,
 }
 
-#[cfg(feature = "backend-blas")]
-impl From<MatrixOp> for cblas_sys::CBLAS_TRANSPOSE {
-    #[inline]
-    fn from(op: MatrixOp) -> Self {
-        match op {
-            MatrixOp::NoTrans => Self::CblasNoTrans,
-            MatrixOp::Trans => Self::CblasTrans,
-        }
-    }
-}
-
 #[inline]
 const fn op_shape(shape: [usize; 2], op: MatrixOp) -> [usize; 2] {
     match op {
@@ -66,12 +55,29 @@ pub(crate) fn axpy_slice<T: Element>(alpha: T, x: &[T], y: &mut [T]) {
 ///
 /// # Panics
 ///
-/// Panics if `x.len() != y.len()`.
+/// Panics if `x.shape() != y.shape()`.
 #[inline]
 #[track_caller]
-pub fn axpy<T: Element>(alpha: T, x: VectorView<'_, T>, mut y: VectorViewMut<'_, T>) {
-    assert_eq!(x.len(), y.len(), "vector length mismatch");
-    axpy_slice(alpha, x.as_slice(), y.as_mut_slice());
+pub fn axpy<T: Element, const N: usize, const M: usize>(
+    alpha: T,
+    x: TensorView<'_, T, M>,
+    y: TensorViewMut<'_, T, N>,
+) {
+    const {
+        assert!(
+            M <= N,
+            "cannot broadcast higher-rank tensor into lower-rank tensor"
+        );
+    }
+    assert_eq!(x.shape(), y.shape()[N - M..], "tensor shape mismatch");
+
+    if alpha.is_zero() {
+        return;
+    }
+
+    for mut chunk in y.chunks::<M>() {
+        axpy_slice(alpha, x.as_slice(), chunk.as_mut_slice());
+    }
 }
 
 #[inline(always)]

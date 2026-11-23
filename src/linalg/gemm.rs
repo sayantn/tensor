@@ -128,14 +128,23 @@ macro_rules! impl_for_blas {
                     "Matrix dimension too large for BLAS"
                 );
 
+                let ta = match ta {
+                    MatrixOp::NoTrans => cblas_sys::CblasNoTrans,
+                    MatrixOp::Trans => cblas_sys::CblasTrans,
+                };
+                let tb = match tb {
+                    MatrixOp::NoTrans => cblas_sys::CblasNoTrans,
+                    MatrixOp::Trans => cblas_sys::CblasTrans,
+                };
+
                 // SAFETY: Shapes and leading dimensions are validated by `check_shapes`
                 // and fit within `c_int`.
                 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                 unsafe {
                     cblas_sys::$fn(
                         cblas_sys::CblasRowMajor,
-                        ta.into(),
-                        tb.into(),
+                        ta,
+                        tb,
                         m as _,
                         n as _,
                         k as _,

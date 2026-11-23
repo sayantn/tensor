@@ -102,11 +102,11 @@ fn indexing_reshape_and_slicing() {
     assert_eq!(t[[1, 2, 1]], 11);
 
     // Slice axis 0 with inclusive, exclusive, and unbounded ranges
-    let s1 = t.slice(1..2);
+    let s1 = t.view().slice(1..2);
     assert_eq!(s1.shape(), [1, 3, 2]);
     assert_eq!(s1[[0, 0, 0]], 6);
 
-    let s2 = t.slice(0..=0);
+    let s2 = t.view().slice(0..=0);
     assert_eq!(s2.shape(), [1, 3, 2]);
     assert_eq!(s2[[0, 2, 1]], 5);
 
@@ -127,18 +127,24 @@ fn chunks_and_broadcast_assign_ops() {
     let bias = Matrix::from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], [2, 2]);
 
     batch.assign(bias.view());
-    for chunk in batch.chunks::<2>() {
+    for chunk in batch.view_mut().chunks::<2>() {
         assert_eq!(chunk.as_slice(), &[1.0, 2.0, 3.0, 4.0]);
     }
 
     let row = Vector::from_vec(vec![10.0_f32, 20.0], [2]);
     batch += row.view();
-    assert_eq!(batch.slice(0..1).as_slice(), &[11.0, 22.0, 13.0, 24.0]);
+    assert_eq!(
+        batch.view_mut().slice(0..1).as_slice(),
+        &[11.0, 22.0, 13.0, 24.0]
+    );
 
     batch *= 2.0;
     batch -= 2.0;
     batch /= 2.0;
-    assert_eq!(batch.slice(2..3).as_slice(), &[10.0, 21.0, 12.0, 23.0]);
+    assert_eq!(
+        batch.view_mut().slice(2..3).as_slice(),
+        &[10.0, 21.0, 12.0, 23.0]
+    );
 }
 
 #[test]
@@ -164,7 +170,7 @@ fn reject_out_of_bounds_index() {
 #[should_panic(expected = "must be non-empty")]
 fn reject_empty_slice_range() {
     let m = Matrix::from_vec(vec![1, 2, 3, 4], [2, 2]);
-    let _ = m.slice(1..1);
+    let _ = m.view().slice(1..1);
 }
 
 // ============================================================================

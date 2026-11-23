@@ -3,7 +3,15 @@ use crate::{MatrixView, MatrixViewMut};
 
 use core::iter::zip;
 
+/// Backend abstraction for general matrix-matrix multiplication (`GEMM`):
+/// `c := alpha * op(a) * op(b) + beta * c`.
 pub trait GemmBackend<T> {
+    /// Performs `c := alpha * op(a) * op(b) + beta * c`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the inner dimensions of `op(a)` and `op(b)` do not match, or
+    /// if `c.shape()` does not match `[m, n]`.
     fn gemm(
         &self,
         alpha: T,
@@ -14,30 +22,44 @@ pub trait GemmBackend<T> {
     );
 }
 
+/// Pure-Rust reference [`GemmBackend`].
+///
+/// Works for any scalar type implementing [`Element`] in `#![no_std]`
+/// environments without external crates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Naive;
 
+/// [`GemmBackend`] backed by system CBLAS (`cblas_sgemm` / `cblas_dgemm`).
 #[cfg(feature = "backend-blas")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Blas;
 
+/// [`GemmBackend`] backed by the pure-Rust `matrixmultiply` crate (`f32` and `f64`).
 #[cfg(feature = "backend-matrixmultiply")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MatrixMultiplyCrate;
 
+/// [`GemmBackend`] backed by the pure-Rust `gemm` crate (`f32`, `f64`, and
+/// optionally `half::f16`).
 #[cfg(feature = "backend-gemm")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GemmCrate;
 
+/// Adaptive [`GemmBackend`] that dispatches to `Small` when `m * n * k <= cutoff`
+/// and to `Large` otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cutoff<Small, Large> {
+    #[allow(clippy::struct_field_names)]
     cutoff: usize,
     small: Small,
     large: Large,
 }
 
 impl<Small, Large> Cutoff<Small, Large> {
+    /// Creates a [`Cutoff`] backend with explicit `small` and `large` backend
+    /// instances.
     #[inline]
+    #[must_use]
     pub const fn with(cutoff: usize, small: Small, large: Large) -> Self {
         Self {
             cutoff,
@@ -48,7 +70,10 @@ impl<Small, Large> Cutoff<Small, Large> {
 }
 
 impl<Small: Default, Large: Default> Cutoff<Small, Large> {
+    /// Creates a [`Cutoff`] backend using [`Default`] instances of `Small` and
+    /// `Large`.
     #[inline]
+    #[must_use]
     pub fn new(cutoff: usize) -> Self {
         Self {
             cutoff,
@@ -75,7 +100,7 @@ fn check_shapes<T>(
 /// `(row stride, col stride)` of the logical `op(x)` for a row-major `x` with `ld` columns.
 #[inline]
 #[allow(unused)]
-fn strides(ld: usize, op: MatrixOp) -> (usize, usize) {
+const fn strides(ld: usize, op: MatrixOp) -> (usize, usize) {
     match op {
         MatrixOp::NoTrans => (ld, 1),
         MatrixOp::Trans => (1, ld),
@@ -99,10 +124,13 @@ macro_rules! impl_for_blas {
                 let [m, n, k] = check_shapes((a, ta), (b, tb), &c);
 
                 assert!(
-                    (m | n | k) <= core::ffi::c_int::MAX as usize,
+                    m | n | k <= core::ffi::c_int::MAX as usize,
                     "Matrix dimension too large for BLAS"
                 );
 
+                // SAFETY: Shapes and leading dimensions are validated by `check_shapes`
+                // and fit within `c_int`.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                 unsafe {
                     cblas_sys::$fn(
                         cblas_sys::CblasRowMajor,
@@ -148,6 +176,8 @@ macro_rules! impl_for_matrixmultiply_crate {
                 let (rsa, csa) = strides(a.ncols(), ta);
                 let (rsb, csb) = strides(b.ncols(), tb);
 
+                // SAFETY: Shapes and strides match the validated `a`, `b`, and `c` buffers.
+                #[allow(clippy::cast_possible_wrap)]
                 unsafe {
                     matrixmultiply::$fn(
                         m,
@@ -193,6 +223,8 @@ macro_rules! impl_for_gemm_crate {
                 let (rsa, csa) = strides(a.ncols(), ta);
                 let (rsb, csb) = strides(b.ncols(), tb);
 
+                // SAFETY: Shapes and strides match the validated `a`, `b`, and `c` buffers.
+                #[allow(clippy::cast_possible_wrap)]
                 unsafe {
                     gemm::gemm(
                         m,
@@ -201,15 +233,15 @@ macro_rules! impl_for_gemm_crate {
                         c.as_mut_ptr(),
                         1,
                         c.ncols() as _,
-                        beta != num_traits::Zero::zero(),
+                        !num_traits::Zero::is_zero(&beta),
                         a.as_ptr(),
                         csa as _,
                         rsa as _,
                         b.as_ptr(),
                         csb as _,
                         rsb as _,
-                        alpha,
                         beta,
+                        alpha,
                         false,
                         false,
                         false,
@@ -232,10 +264,6 @@ impl_for_gemm_crate!(
 impl_for_gemm_crate!(
     #[cfg(all(feature = "backend-gemm", feature = "f16"))]
     half::f16
-);
-impl_for_gemm_crate!(
-    #[cfg(all(feature = "backend-gemm", feature = "f16"))]
-    half::bf16
 );
 
 impl<T, Small: GemmBackend<T>, Large: GemmBackend<T>> GemmBackend<T> for Cutoff<Small, Large> {
@@ -310,9 +338,10 @@ impl<T: Element> GemmBackend<T> for Naive {
             (MatrixOp::Trans, MatrixOp::Trans) => {
                 for (i, c_row) in c.chunks_exact_mut(n).enumerate() {
                     for p in 0..k {
-                        // SAFETY: i < m, p < k, j < n; a has k * m elements, b has n * k.
+                        // SAFETY: i < m, p < k; a has k * m elements.
                         let a_ip = alpha * unsafe { *a.get_unchecked(p * m + i) };
                         for (j, cj) in c_row.iter_mut().enumerate() {
+                            // SAFETY: p < k, j < n; b has n * k elements.
                             *cj += a_ip * unsafe { *b.get_unchecked(j * k + p) };
                         }
                     }

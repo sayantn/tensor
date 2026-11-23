@@ -1,10 +1,12 @@
 #![allow(unused_variables)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use half::f16;
 use std::hint::black_box;
 use tensor::Matrix;
 use tensor::linalg::{Element, GemmBackend, MatrixOp, Naive};
+
+#[cfg(feature = "f16")]
+use half::f16;
 
 #[cfg(feature = "backend-blas")]
 use tensor::linalg::Blas;
@@ -13,6 +15,7 @@ use tensor::linalg::GemmCrate;
 #[cfg(feature = "backend-matrixmultiply")]
 use tensor::linalg::MatrixMultiplyCrate;
 
+#[allow(clippy::too_many_arguments)]
 fn bench_gemm_sizes<T, B>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     name: &str,
@@ -70,6 +73,7 @@ trait OptionalBackends<T: Element> {
     );
 }
 
+#[cfg(feature = "f16")]
 impl OptionalBackends<f16> for f16 {
     fn run_extra(
         group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
@@ -175,6 +179,7 @@ fn gemm_benchmarks(c: &mut Criterion) {
         (64, 256, 256),
     ];
 
+    #[cfg(feature = "f16")]
     run_suite(c, "f16", &sizes, f16::from_f32(0.05), f16::from_f32(0.05));
     run_suite(c, "f32", &sizes, 1.001_f32, 0.999_f32);
     run_suite(c, "f64", &sizes, 1.001_f64, 0.999_f64);

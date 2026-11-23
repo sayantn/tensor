@@ -1,3 +1,6 @@
+//! BLAS-style Level-1, Level-2, and Level-3 dense linear algebra routines over
+//! [`VectorView`], [`VectorViewMut`], [`MatrixView`], and [`MatrixViewMut`].
+
 use crate::{MatrixView, MatrixViewMut, VectorView, VectorViewMut};
 
 use core::iter::zip;
@@ -7,24 +10,30 @@ use num_traits::{One, Zero};
 mod gemm;
 pub use gemm::*;
 
+/// Scalar ring-like element trait required by generic linear algebra kernels.
 pub trait Element:
     Add<Output = Self> + AddAssign + Mul<Output = Self> + MulAssign + Copy + PartialEq + Zero + One
 {
 }
+
 impl<
     T: Mul<Output = Self> + MulAssign + Add<Output = Self> + AddAssign + Copy + PartialEq + Zero + One,
 > Element for T
 {
 }
 
+/// Optional transposition applied logically to a [`MatrixView`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MatrixOp {
+    /// Use the matrix as stored (`[rows, cols]`).
     NoTrans,
+    /// Logically transpose the matrix (`[cols, rows]`).
     Trans,
 }
 
 #[cfg(feature = "backend-blas")]
 impl From<MatrixOp> for cblas_sys::CBLAS_TRANSPOSE {
+    #[inline]
     fn from(op: MatrixOp) -> Self {
         match op {
             MatrixOp::NoTrans => Self::CblasNoTrans,
@@ -34,7 +43,7 @@ impl From<MatrixOp> for cblas_sys::CBLAS_TRANSPOSE {
 }
 
 #[inline]
-fn op_shape(shape: [usize; 2], op: MatrixOp) -> [usize; 2] {
+const fn op_shape(shape: [usize; 2], op: MatrixOp) -> [usize; 2] {
     match op {
         MatrixOp::NoTrans => shape,
         MatrixOp::Trans => [shape[1], shape[0]],
@@ -42,6 +51,7 @@ fn op_shape(shape: [usize; 2], op: MatrixOp) -> [usize; 2] {
 }
 
 #[inline(always)]
+#[allow(clippy::inline_always)]
 pub(crate) fn axpy_slice<T: Element>(alpha: T, x: &[T], y: &mut [T]) {
     debug_assert_eq!(x.len(), y.len());
     if alpha.is_zero() {
@@ -52,6 +62,11 @@ pub(crate) fn axpy_slice<T: Element>(alpha: T, x: &[T], y: &mut [T]) {
     }
 }
 
+/// Computes `y := alpha * x + y` (BLAS Level-1 `axpy`).
+///
+/// # Panics
+///
+/// Panics if `x.len() != y.len()`.
 #[inline]
 #[track_caller]
 pub fn axpy<T: Element>(alpha: T, x: VectorView<'_, T>, mut y: VectorViewMut<'_, T>) {
@@ -60,6 +75,7 @@ pub fn axpy<T: Element>(alpha: T, x: VectorView<'_, T>, mut y: VectorViewMut<'_,
 }
 
 #[inline(always)]
+#[allow(clippy::inline_always)]
 pub(crate) fn dot_slice<T: Element>(x: &[T], y: &[T]) -> T {
     const LANES: usize = 16;
     debug_assert_eq!(x.len(), y.len());
@@ -84,8 +100,13 @@ pub(crate) fn dot_slice<T: Element>(x: &[T], y: &[T]) -> T {
     sum
 }
 
-/// Dot product with independent accumulators (breaks the add dependency chain and lets LLVM
-/// vectorize without needing float reassociation).
+/// Computes the inner product `x^T y` (BLAS Level-1 `dot`) using 16
+/// independent accumulators to break loop-carried dependency chains and
+/// enable SIMD vectorization without floating-point reassociation flags.
+///
+/// # Panics
+///
+/// Panics if `x.len() != y.len()`.
 #[inline]
 #[must_use]
 #[track_caller]
@@ -94,6 +115,12 @@ pub fn dot<T: Element>(x: VectorView<'_, T>, y: VectorView<'_, T>) -> T {
     dot_slice(x.as_slice(), y.as_slice())
 }
 
+/// Computes `y := alpha * op(a) * x + beta * y` (BLAS Level-2 `gemv`).
+///
+/// # Panics
+///
+/// Panics if the logical column count of `op(a)` does not equal `x.len()` or
+/// if the logical row count of `op(a)` does not equal `y.len()`.
 #[inline]
 #[track_caller]
 pub fn gemv<T: Element>(
@@ -133,6 +160,15 @@ pub fn gemv<T: Element>(
     }
 }
 
+/// Accumulates the column-wise sum of `x` into `y`:
+/// `y[j] := sum_i x[i, j] + beta * y[j]`.
+///
+/// Processes rows in unrolled 4-row blocks to improve instruction-level
+/// parallelism and reduce write traffic to `y`.
+///
+/// # Panics
+///
+/// Panics if `x.ncols() != y.len()`.
 #[inline]
 #[track_caller]
 pub fn sum_axis0<T: Element>(x: MatrixView<'_, T>, beta: T, mut y: VectorViewMut<'_, T>) {
@@ -165,6 +201,12 @@ pub fn sum_axis0<T: Element>(x: MatrixView<'_, T>, beta: T, mut y: VectorViewMut
     }
 }
 
+/// Computes the rank-1 outer product update `a := alpha * x * y^T + a` (BLAS
+/// Level-2 `ger`).
+///
+/// # Panics
+///
+/// Panics if `[x.len(), y.len()] != a.shape()`.
 #[inline]
 #[track_caller]
 pub fn ger<T: Element>(

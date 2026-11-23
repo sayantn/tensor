@@ -1,8 +1,10 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use half::f16;
 use std::hint::black_box;
 use tensor::linalg::{Element, MatrixOp, axpy, dot, gemv, ger, sum_axis0};
 use tensor::{Matrix, Vector};
+
+#[cfg(feature = "f16")]
+use half::f16;
 
 trait BenchElem: Element {
     fn from_f32(v: f32) -> Self;
@@ -22,6 +24,7 @@ impl BenchElem for f64 {
     }
 }
 
+#[cfg(feature = "f16")]
 impl BenchElem for f16 {
     #[inline]
     fn from_f32(v: f32) -> Self {
@@ -179,8 +182,11 @@ fn bench_mat_vec_ops<T: BenchElem>(c: &mut Criterion, dtype: &str) {
 }
 
 fn bench_all(c: &mut Criterion) {
-    bench_vec_ops::<f16>(c, "f16");
-    bench_mat_vec_ops::<f16>(c, "f16");
+    #[cfg(feature = "f16")]
+    {
+        bench_vec_ops::<f16>(c, "f16");
+        bench_mat_vec_ops::<f16>(c, "f16");
+    }
 
     bench_vec_ops::<f32>(c, "f32");
     bench_mat_vec_ops::<f32>(c, "f32");

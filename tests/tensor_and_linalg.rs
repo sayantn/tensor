@@ -1,6 +1,6 @@
 #![allow(clippy::float_cmp, clippy::many_single_char_names)]
 
-use tensor::linalg::{Cutoff, GemmBackend, MatrixOp, Naive, axpy, dot, gemv, ger, sum_axis0};
+use tensor::linalg::{Cutoff, GemmBackend, MatrixOp, Naive, axpy, dot, gemv, ger, sum_axis};
 use tensor::{Matrix, Scalar, Tensor, TensorViewMut, Vector};
 
 #[cfg(feature = "backend-blas")]
@@ -258,7 +258,7 @@ fn sum_axis0_unrolled_and_remainder_rows() {
     let x = Matrix::from_vec(data, [6, 5]);
     let mut y = Vector::from_vec(vec![10.0; 5], [5]);
 
-    sum_axis0(x.view(), 2.0, y.view_mut());
+    sum_axis(x.view(), 0, 2.0, y.view_mut());
 
     // Column j has values (j+1) + 5*r for r in 0..6:
     // sum_r = 6*(j+1) + 5*(0+1+2+3+4+5) = 6*(j+1) + 75

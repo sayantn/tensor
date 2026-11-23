@@ -3,6 +3,7 @@
 
 use crate::{MatrixView, MatrixViewMut, TensorView, TensorViewMut, VectorView, VectorViewMut};
 
+use core::array;
 use core::iter::zip;
 use core::ops::{Add, AddAssign, Mul, MulAssign};
 use num_traits::{One, Zero};
@@ -75,9 +76,8 @@ pub fn axpy<T: Element, const N: usize, const M: usize>(
         return;
     }
 
-    for mut chunk in y.chunks::<M>() {
-        axpy_slice(alpha, x.as_slice(), chunk.as_mut_slice());
-    }
+    y.chunks::<M>()
+        .for_each(|chunk| axpy_slice(alpha, x.as_slice(), chunk.into_mut_slice()));
 }
 
 #[inline(always)]
@@ -159,26 +159,108 @@ pub fn gemv<T: Element>(
             }
         }
         MatrixOp::Trans => {
-            for (&xp, a_row) in zip(x_slice, a_slice.chunks_exact(a.ncols())) {
+            let ncols = a.ncols();
+            let mut x_blocks = x_slice.chunks_exact(4);
+            let mut a_blocks = a_slice.chunks_exact(4 * ncols);
+
+            for (xb, ab) in zip(&mut x_blocks, &mut a_blocks) {
+                let ax0 = alpha * xb[0];
+                let ax1 = alpha * xb[1];
+                let ax2 = alpha * xb[2];
+                let ax3 = alpha * xb[3];
+
+                let (r0, rest) = ab.split_at(ncols);
+                let (r1, rest) = rest.split_at(ncols);
+                let (r2, r3) = rest.split_at(ncols);
+
+                for (yj, ((&a0, &a1), (&a2, &a3))) in
+                    zip(&mut *y_slice, zip(zip(r0, r1), zip(r2, r3)))
+                {
+                    *yj += (ax0 * a0 + ax1 * a1) + (ax2 * a2 + ax3 * a3);
+                }
+            }
+
+            for (&xp, a_row) in zip(
+                x_blocks.remainder(),
+                a_blocks.remainder().chunks_exact(ncols),
+            ) {
                 axpy_slice(alpha * xp, a_row, y_slice);
             }
         }
     }
 }
 
-/// Accumulates the column-wise sum of `x` into `y`:
-/// `y[j] := sum_i x[i, j] + beta * y[j]`.
-///
-/// Processes rows in unrolled 4-row blocks to improve instruction-level
-/// parallelism and reduce write traffic to `y`.
+#[inline(always)]
+#[allow(clippy::inline_always)]
+pub(crate) fn sum_slice<T: Element>(x: &[T]) -> T {
+    const LANES: usize = 16;
+
+    let (xc, xr) = x.as_chunks::<LANES>();
+    let mut acc = [T::zero(); LANES];
+    for xa in xc {
+        for l in 0..LANES {
+            acc[l] += xa[l];
+        }
+    }
+
+    let mut sum = T::zero();
+    for v in acc {
+        sum += v;
+    }
+    for &xv in xr {
+        sum += xv;
+    }
+    sum
+}
+
+#[inline(always)]
+#[allow(clippy::inline_always)]
+fn sum_rows_into<T: Element>(x: &[T], ncols: usize, y: &mut [T]) {
+    debug_assert_eq!(y.len(), ncols);
+    debug_assert_eq!(x.len() % ncols, 0);
+
+    let mut blocks = x.chunks_exact(4 * ncols);
+    for block in &mut blocks {
+        let (r0, rest) = block.split_at(ncols);
+        let (r1, rest) = rest.split_at(ncols);
+        let (r2, r3) = rest.split_at(ncols);
+
+        for (y, ((&r0, &r1), (&r2, &r3))) in zip(&mut *y, zip(zip(r0, r1), zip(r2, r3))) {
+            *y += (r0 + r1) + (r2 + r3);
+        }
+    }
+
+    for row in blocks.remainder().chunks_exact(ncols) {
+        for (yj, &xij) in zip(&mut *y, row) {
+            *yj += xij;
+        }
+    }
+}
+
+/// Accumulates the sum of `x` along `axis` into `y`:
+/// `y[..., j, ...] := sum_i x[..., i, ...] + beta * y[..., j, ...]`.
 ///
 /// # Panics
 ///
-/// Panics if `x.ncols() != y.len()`.
+/// Panics at compile time if `M + 1 != N`, or at runtime if `axis >= N` or if
+/// `y.shape()` does not match `x.shape()` with `axis` removed.
 #[inline]
 #[track_caller]
-pub fn sum_axis0<T: Element>(x: MatrixView<'_, T>, beta: T, mut y: VectorViewMut<'_, T>) {
-    assert_eq!(x.ncols(), y.len(), "output length mismatch");
+pub fn sum_axis<T: Element, const N: usize, const M: usize>(
+    x: TensorView<'_, T, N>,
+    axis: usize,
+    beta: T,
+    mut y: TensorViewMut<'_, T, M>,
+) {
+    const {
+        assert!(M + 1 == N, "output rank M must equal input rank N - 1");
+    }
+    assert!(axis < N, "axis {axis} out of bounds for rank {N}");
+
+    let x_shape = x.shape();
+    let expected_shape: [usize; M] =
+        array::from_fn(|i| if i < axis { x_shape[i] } else { x_shape[i + 1] });
+    assert_eq!(y.shape(), expected_shape, "output shape mismatch");
 
     if beta.is_zero() {
         y.fill(T::zero());
@@ -186,23 +268,25 @@ pub fn sum_axis0<T: Element>(x: MatrixView<'_, T>, beta: T, mut y: VectorViewMut
         y *= beta;
     }
 
-    let ncols = x.ncols();
+    let axis_len = x_shape[axis];
+    let inner = crate::shape_len(&x_shape[axis + 1..]);
+    let x_slice = x.as_slice();
     let y_slice = y.as_mut_slice();
-    let mut blocks = x.as_slice().chunks_exact(4 * ncols);
 
-    for block in &mut blocks {
-        let (r0, rest) = block.split_at(ncols);
-        let (r1, rest) = rest.split_at(ncols);
-        let (r2, r3) = rest.split_at(ncols);
-
-        for j in 0..ncols {
-            y_slice[j] += (r0[j] + r1[j]) + (r2[j] + r3[j]);
+    if inner == 1 {
+        // `axis == N - 1`: each output element is the sum of a contiguous row of length `axis_len`.
+        for (yi, row) in zip(y_slice, x_slice.chunks_exact(axis_len)) {
+            *yi += sum_slice(row);
         }
-    }
-
-    for row in blocks.remainder().chunks_exact(ncols) {
-        for (yj, &xij) in zip(&mut *y_slice, row) {
-            *yj += xij;
+    } else if axis == 0 {
+        sum_rows_into(x_slice, inner, y_slice);
+    } else {
+        // `axis < N - 1`: each outer block is a `[axis_len, inner]` slice reduced along axis 0.
+        for (y_block, x_block) in zip(
+            y_slice.chunks_exact_mut(inner),
+            x_slice.chunks_exact(axis_len * inner),
+        ) {
+            sum_rows_into(x_block, inner, y_block);
         }
     }
 }

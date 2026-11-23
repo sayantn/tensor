@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use half::f16;
 use std::hint::black_box;
-use tensor::linalg::{Element, MatrixOp, axpy, dot, gemv, ger, sum_axis0};
+use tensor::linalg::{Element, MatrixOp, axpy, dot, gemv, ger, sum_axis};
 use tensor::{Matrix, Vector};
 
 trait BenchElem: Element {
@@ -142,8 +142,9 @@ fn bench_mat_vec_ops<T: BenchElem>(c: &mut Criterion, dtype: &str) {
             &(m, n),
             |b, _| {
                 b.iter(|| {
-                    sum_axis0(
+                    sum_axis(
                         black_box(x.view()),
+                        0,
                         black_box(T::zero()),
                         black_box(y.view_mut()),
                     );

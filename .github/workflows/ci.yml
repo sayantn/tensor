@@ -26,10 +26,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy feature matrix
-        run: ./check.sh
+        run: ci/check.sh
 
       - name: Docs
-        run: ./dox.sh
+        run: ci/dox.sh
 
       - name: Tests & Miri
-        run: ./test.sh
+        run: ci/test.sh

@@ -262,7 +262,7 @@ impl_for_gemm_crate!(
     f64
 );
 impl_for_gemm_crate!(
-    #[cfg(all(feature = "backend-gemm", feature = "f16"))]
+    #[cfg(feature = "gemm-f16")]
     half::f16
 );
 

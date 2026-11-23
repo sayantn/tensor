@@ -432,7 +432,7 @@ fn blas_matches_naive() {
     verify_gemm_backend_f64(&Blas);
 }
 
-#[cfg(all(feature = "backend-gemm", feature = "f16"))]
+#[cfg(feature = "gemm-f16")]
 #[test]
 fn gemm_f16_match_naive() {
     use half::f16;

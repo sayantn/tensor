@@ -1,0 +1,32 @@
+[package]
+name        = "tensor-benches"
+version     = "0.0.0"
+edition     = "2024"
+publish     = false
+autobenches = false
+
+[features]
+matrixmultiply-constconf = ["tensor/matrixmultiply-constconf"]
+x86-v4                   = ["tensor/gemm-x86-v4"]
+wasm-simd128             = ["tensor/gemm-wasm-simd128"]
+apple-amx                = ["tensor/gemm-apple-amx"]
+
+[dependencies]
+tensor = { path = "..", features = [
+    "backend-gemm",
+    "backend-matrixmultiply",
+    "backend-blas",
+    "gemm-f16",
+] }
+half = { version = "2.7.1", features = ["num-traits"] }
+criterion = "0.8.2"
+
+[[bench]]
+name    = "gemm"
+path    = "gemm.rs"
+harness = false
+
+[[bench]]
+name    = "linalg"
+path    = "linalg.rs"
+harness = false

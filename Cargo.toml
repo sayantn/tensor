@@ -1,13 +1,17 @@
 [package]
-name    = "tensor"
-version = "0.1.0"
-edition = "2024"
+name        = "tensor"
+version     = "0.1.0"
+edition     = "2024"
+autobenches = false
+
+[workspace]
+members = [".", "benches"]
 
 [features]
 default = ["gemm-x86-v4"]
 
-# Scalar support (works standalone with `Naive` or enables `f16` in `gemm`)
-f16 = ["dep:half", "gemm?/f16"]
+# Scalar support (enables `f16` in `gemm`) (implies `backend-gemm`)
+gemm-f16 = ["backend-gemm", "dep:half", "gemm/f16"]
 
 # GEMM Backends
 backend-blas           = ["dep:cblas-sys"]
@@ -31,20 +35,8 @@ half = { version = "2.7.1", features = ["num-traits"], optional = true }
 cblas-sys = { version = "0.3.0", optional = true }
 gemm = { version = "0.19.0", default-features = false, features = [
     "std",
-    "x86-v4",
 ], optional = true }
 matrixmultiply = { version = "0.3.11", optional = true }
-
-[dev-dependencies]
-criterion = "0.8.2"
-
-[[bench]]
-name    = "gemm"
-harness = false
-
-[[bench]]
-name    = "linalg"
-harness = false
 
 [package.metadata.docs.rs]
 all-features = true

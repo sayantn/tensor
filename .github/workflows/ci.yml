@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenBLAS
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libopenblas-dev
+
+      - name: Install Rust toolchains (stable + nightly + miri)
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component miri
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy feature matrix
+        run: ./check.sh
+
+      - name: Docs
+        run: ./dox.sh
+
+      - name: Tests & Miri
+        run: ./test.sh

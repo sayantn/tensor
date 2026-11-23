@@ -144,9 +144,22 @@ pub fn sum_axis0<T: Element>(x: MatrixView<'_, T>, beta: T, mut y: VectorViewMut
         y *= beta;
     }
 
+    let ncols = x.ncols();
     let y_slice = y.as_mut_slice();
-    for x_row in x.as_slice().chunks_exact(x.ncols()) {
-        for (yj, &xij) in zip(&mut *y_slice, x_row) {
+    let mut blocks = x.as_slice().chunks_exact(4 * ncols);
+
+    for block in &mut blocks {
+        let (r0, rest) = block.split_at(ncols);
+        let (r1, rest) = rest.split_at(ncols);
+        let (r2, r3) = rest.split_at(ncols);
+
+        for j in 0..ncols {
+            y_slice[j] += (r0[j] + r1[j]) + (r2[j] + r3[j]);
+        }
+    }
+
+    for row in blocks.remainder().chunks_exact(ncols) {
+        for (yj, &xij) in zip(&mut *y_slice, row) {
             *yj += xij;
         }
     }

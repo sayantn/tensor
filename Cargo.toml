@@ -14,17 +14,21 @@ num-traits = { version = "0.2.19", default-features = false }
 cblas-sys = { version = "0.3.0", optional = true }
 gemm = { version = "0.19.0", default-features = false, features = [
     "std",
-    "x86-v4"
+    "x86-v4",
 ], optional = true }
 matrixmultiply = { version = "0.3.11", optional = true }
 half = { version = "2.7.1", features = ["num-traits"], optional = true }
 
 [dev-dependencies]
 criterion = "0.8.2"
-half = { version = "2.7.1", features = ["num-traits"] }
+half      = { version = "2.7.1", features = ["num-traits"] }
 
 [[bench]]
 name    = "gemm"
+harness = false
+
+[[bench]]
+name    = "linalg"
 harness = false
 
 [package.metadata.docs.rs]

@@ -1,16 +1,21 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![no_std]
-#![allow(clippy::len_without_is_empty)]
+#![allow(
+    clippy::len_without_is_empty,
+    clippy::many_single_char_names,
+    clippy::needless_pass_by_value
+)]
 
 extern crate alloc;
 use alloc::{boxed::Box, vec, vec::Vec};
 
+use core::array;
 use core::fmt::{self, Debug, Display, Formatter};
 use core::iter::{DoubleEndedIterator, ExactSizeIterator, FusedIterator, zip};
 use core::ops::{
     AddAssign, Bound, DivAssign, Index, IndexMut, MulAssign, Range, RangeBounds, SubAssign,
 };
 use core::slice::{self, Iter, IterMut};
-use core::{array, mem};
 
 pub mod linalg;
 
@@ -58,12 +63,17 @@ fn shape_len(shape: &[usize]) -> usize {
 
 #[inline]
 fn checked_shape_len(shape: &[usize]) -> usize {
-    shape.iter().fold(1, |acc, &x| acc.checked_mul(x).expect("shape overflow"))
+    shape
+        .iter()
+        .fold(1, |acc, &x| acc.checked_mul(x).expect("shape overflow"))
 }
 
 #[inline]
 fn validate_shape(buffer_len: usize, shape: &[usize]) {
-    assert!(!shape.contains(&0), "tensor dimensions must be non-zero, got {shape:?}",);
+    assert!(
+        !shape.contains(&0),
+        "tensor dimensions must be non-zero, got {shape:?}",
+    );
     assert_eq!(
         buffer_len,
         checked_shape_len(shape),
@@ -92,7 +102,10 @@ fn resolve_range<R: RangeBounds<usize>>(range: R, axis_len: usize) -> Range<usiz
         Bound::Unbounded => axis_len,
     };
     assert!(start < end, "slice range {start}..{end} must be non-empty");
-    assert!(end <= axis_len, "slice end {end} exceeds axis len {axis_len}");
+    assert!(
+        end <= axis_len,
+        "slice end {end} exceeds axis len {axis_len}"
+    );
     start..end
 }
 
@@ -126,6 +139,12 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     }
 
     #[inline]
+    #[must_use]
+    pub fn as_ptr(&self) -> *const T {
+        self.data.as_ptr()
+    }
+
+    #[inline]
     pub fn iter(&self) -> Iter<'a, T> {
         self.data.iter()
     }
@@ -133,12 +152,18 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     #[inline]
     pub fn reshape<const M: usize>(self, new_shape: [usize; M]) -> TensorView<'a, T, M> {
         validate_shape(self.len(), &new_shape);
-        TensorView { data: self.data, shape: new_shape }
+        TensorView {
+            data: self.data,
+            shape: new_shape,
+        }
     }
 
     #[inline]
     pub fn flatten(self) -> TensorView<'a, T, 1> {
-        TensorView { data: self.data, shape: [self.len()] }
+        TensorView {
+            data: self.data,
+            shape: [self.len()],
+        }
     }
 
     #[inline]
@@ -170,7 +195,10 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
         let chunk_len = shape_len(&sub_shape);
         self.data
             .chunks_exact(chunk_len)
-            .map(move |chunk| TensorView { data: chunk, shape: sub_shape })
+            .map(move |chunk| TensorView {
+                data: chunk,
+                shape: sub_shape,
+            })
     }
 
     pub fn to_tensor(self) -> Tensor<T, N>
@@ -179,23 +207,15 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     {
         Tensor::from_vec(self.data.to_vec(), self.shape)
     }
-
-    pub unsafe fn transmute<U>(self) -> TensorView<'a, U, N> {
-        const {
-            assert!(mem::size_of::<T>() == mem::size_of::<U>());
-            assert!(mem::align_of::<T>() == mem::align_of::<U>());
-        }
-        TensorView {
-            shape: self.shape(),
-            data: unsafe { slice::from_raw_parts(self.data.as_ptr().cast(), self.data.len()) },
-        }
-    }
 }
 
 impl<'a, T> TensorView<'a, T, 0> {
     #[inline]
     pub fn scalar(val: &'a T) -> Self {
-        Self { data: slice::from_ref(val), shape: [] }
+        Self {
+            data: slice::from_ref(val),
+            shape: [],
+        }
     }
 }
 
@@ -239,8 +259,20 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     }
 
     #[inline]
+    #[must_use]
+    pub fn as_ptr(&self) -> *const T {
+        self.data.as_ptr()
+    }
+
+    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         self.data
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.data.as_mut_ptr()
     }
 
     #[inline]
@@ -257,17 +289,26 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
 
     #[inline]
     pub fn view(&self) -> TensorView<'_, T, N> {
-        TensorView { data: self.data, shape: self.shape }
+        TensorView {
+            data: self.data,
+            shape: self.shape,
+        }
     }
 
     #[inline]
     pub fn into_view(self) -> TensorView<'a, T, N> {
-        TensorView { data: self.data, shape: self.shape }
+        TensorView {
+            data: self.data,
+            shape: self.shape,
+        }
     }
 
     #[inline]
     pub fn view_mut(&mut self) -> TensorViewMut<'_, T, N> {
-        TensorViewMut { data: self.data, shape: self.shape }
+        TensorViewMut {
+            data: self.data,
+            shape: self.shape,
+        }
     }
 
     #[inline]
@@ -294,10 +335,13 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         T: Copy,
     {
         const {
-            assert!(M <= N, "cannot broadcast higher-rank tensor into lower-rank tensor");
+            assert!(
+                M <= N,
+                "cannot broadcast higher-rank tensor into lower-rank tensor"
+            );
         }
         let tail = &self.shape[N - M..];
-        assert_eq!(tail, &src.shape()[..], "assign shape mismatch");
+        assert_eq!(tail, src.shape(), "assign shape mismatch");
         let src_slice = src.as_slice();
         for mut chunk in self.view_mut().chunks_mut::<M>() {
             chunk.as_mut_slice().copy_from_slice(src_slice);
@@ -305,28 +349,20 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     }
 
     #[inline]
-    pub fn assign_strided(&mut self, src: TensorView<'_, T, N>, strides: [usize; N]) {
-        for i in 0..N {
-            if strides[i] == 0 {
-                assert_eq!(src.shape[i], 1, "source dimension size must be 1 to use a zero stride");
-            } else {
-                let div = src.shape[i] / strides[i];
-                let rem = src.shape[i] % strides[i];
-                assert_eq!(rem, 0, "source dimension size must be divisible by the stride size");
-                assert_eq!(self.shape[i], div, "")
-            }
+    pub fn reshape<const M: usize>(self, new_shape: [usize; M]) -> TensorViewMut<'a, T, M> {
+        validate_shape(self.len(), &new_shape);
+        TensorViewMut {
+            data: self.data,
+            shape: new_shape,
         }
     }
 
     #[inline]
-    pub fn reshape<const M: usize>(self, new_shape: [usize; M]) -> TensorViewMut<'a, T, M> {
-        validate_shape(self.len(), &new_shape);
-        TensorViewMut { data: self.data, shape: new_shape }
-    }
-
-    #[inline]
     pub fn flatten(self) -> TensorViewMut<'a, T, 1> {
-        TensorViewMut { shape: [self.data.len()], data: self.data }
+        TensorViewMut {
+            shape: [self.data.len()],
+            data: self.data,
+        }
     }
 
     #[inline]
@@ -342,7 +378,10 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         let start = r.start * inner;
         let end = r.end * inner;
         let new_data = unsafe { self.data.get_unchecked_mut(start..end) };
-        TensorViewMut { data: new_data, shape: new_shape }
+        TensorViewMut {
+            data: new_data,
+            shape: new_shape,
+        }
     }
 
     #[inline]
@@ -365,37 +404,27 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         let chunk_len = shape_len(&sub_shape);
         self.data
             .chunks_exact_mut(chunk_len)
-            .map(move |chunk| TensorViewMut { data: chunk, shape: sub_shape })
+            .map(move |chunk| TensorViewMut {
+                data: chunk,
+                shape: sub_shape,
+            })
     }
+
     pub fn to_tensor(&self) -> Tensor<T, N>
     where
         T: Clone,
     {
         self.view().to_tensor()
     }
-
-    pub unsafe fn transmute<U>(self) -> TensorView<'a, U, N> {
-        unsafe { self.into_view().transmute() }
-    }
-
-    pub unsafe fn transmute_mut<U>(self) -> TensorViewMut<'a, U, N> {
-        const {
-            assert!(mem::size_of::<T>() == mem::size_of::<U>());
-            assert!(mem::align_of::<T>() == mem::align_of::<U>());
-        }
-        TensorViewMut {
-            shape: self.shape(),
-            data: unsafe {
-                slice::from_raw_parts_mut(self.data.as_mut_ptr().cast(), self.data.len())
-            },
-        }
-    }
 }
 
 impl<'a, T> TensorViewMut<'a, T, 0> {
     #[inline]
     pub fn scalar(val: &'a mut T) -> Self {
-        Self { data: slice::from_mut(val), shape: [] }
+        Self {
+            data: slice::from_mut(val),
+            shape: [],
+        }
     }
 }
 
@@ -424,7 +453,10 @@ impl<T, const N: usize> Tensor<T, N> {
     #[inline]
     pub fn from_vec(data: Vec<T>, shape: [usize; N]) -> Self {
         validate_shape(data.len(), &shape);
-        Self { data: data.into_boxed_slice(), shape }
+        Self {
+            data: data.into_boxed_slice(),
+            shape,
+        }
     }
 
     #[inline]
@@ -468,18 +500,36 @@ impl<T, const N: usize> Tensor<T, N> {
     }
 
     #[inline]
+    #[must_use]
+    pub fn as_ptr(&self) -> *const T {
+        self.data.as_ptr()
+    }
+
+    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         &mut self.data
     }
 
     #[inline]
+    #[must_use]
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.data.as_mut_ptr()
+    }
+
+    #[inline]
     pub fn view(&self) -> TensorView<'_, T, N> {
-        TensorView { data: &self.data, shape: self.shape }
+        TensorView {
+            data: &self.data,
+            shape: self.shape,
+        }
     }
 
     #[inline]
     pub fn view_mut(&mut self) -> TensorViewMut<'_, T, N> {
-        TensorViewMut { data: &mut self.data, shape: self.shape }
+        TensorViewMut {
+            data: &mut self.data,
+            shape: self.shape,
+        }
     }
 
     #[inline]
@@ -511,7 +561,10 @@ impl<T, const N: usize> Tensor<T, N> {
     #[inline]
     pub fn reshape<const M: usize>(self, new_shape: [usize; M]) -> Tensor<T, M> {
         validate_shape(self.len(), &new_shape);
-        Tensor { data: self.data, shape: new_shape }
+        Tensor {
+            data: self.data,
+            shape: new_shape,
+        }
     }
 
     #[inline]

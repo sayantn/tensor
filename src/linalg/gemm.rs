@@ -1,337 +1,321 @@
-use core::any::TypeId;
-use core::mem;
-
-#[cfg(feature = "blas")]
-use cblas_sys::{CBLAS_LAYOUT::CblasRowMajor, CBLAS_TRANSPOSE, cblas_dgemm, cblas_sgemm};
-#[cfg(feature = "blas")]
-use core::ffi::c_int;
-
-#[cfg(feature = "faer")]
-use faer::traits::ComplexField;
-#[cfg(feature = "faer")]
-use faer::{Accum, MatMut, MatRef, Par, linalg::matmul::matmul};
-
-use crate::linalg::{Element, MatrixOp};
+use super::{Element, MatrixOp, axpy_slice, dot_slice, op_shape};
 use crate::{MatrixView, MatrixViewMut};
 
-/// Performs `C = alpha * op(A) * op(B) + beta * C`
-/// Dynamically dispatches to specialized f32/f64 backends if enabled.
-pub fn gemm<T: Element>(
-    alpha: T,
-    (a, trans_a): (MatrixView<'_, T>, MatrixOp),
-    (b, trans_b): (MatrixView<'_, T>, MatrixOp),
-    beta: T,
-    c: MatrixViewMut<'_, T>,
-) {
-    let (m_a, k_a) = match trans_a {
-        MatrixOp::NoTrans => (a.nrows(), a.ncols()),
-        MatrixOp::Trans => (a.ncols(), a.nrows()),
-    };
-    let (k_b, n_b) = match trans_b {
-        MatrixOp::NoTrans => (b.nrows(), b.ncols()),
-        MatrixOp::Trans => (b.ncols(), b.nrows()),
-    };
+use core::iter::zip;
 
-    assert_eq!(k_a, k_b, "Inner dimension mismatch: {k_a} != {k_b}");
-    assert_eq!((m_a, n_b), (c.nrows(), c.ncols()), "Output shape mismatch");
-
-    // Fast-path dispatch for f32
-    if TypeId::of::<T>() == TypeId::of::<f32>() {
-        unsafe {
-            gemm_f32(
-                mem::transmute_copy(&alpha),
-                (a.transmute(), trans_a),
-                (b.transmute(), trans_b),
-                mem::transmute_copy(&beta),
-                c.transmute_mut(),
-            );
-        }
-        return;
-    }
-
-    // Fast-path dispatch for f64
-    if TypeId::of::<T>() == TypeId::of::<f64>() {
-        unsafe {
-            gemm_f64(
-                mem::transmute_copy(&alpha),
-                (a.transmute(), trans_a),
-                (b.transmute(), trans_b),
-                mem::transmute_copy(&beta),
-                c.transmute_mut(),
-            );
-        }
-        return;
-    }
-
-    // Fallback for all other types
-    naive_gemm(alpha, (a, trans_a), (b, trans_b), beta, c);
+pub trait GemmBackend<T> {
+    fn gemm(
+        &self,
+        alpha: T,
+        a: (MatrixView<'_, T>, MatrixOp),
+        b: (MatrixView<'_, T>, MatrixOp),
+        beta: T,
+        c: MatrixViewMut<'_, T>,
+    );
 }
 
-// ============================================================================
-// Specialized Backends
-// ============================================================================
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Naive;
 
-fn gemm_f32(
-    alpha: f32,
-    (a, trans_a): (MatrixView<'_, f32>, MatrixOp),
-    (b, trans_b): (MatrixView<'_, f32>, MatrixOp),
-    beta: f32,
-    mut c: MatrixViewMut<'_, f32>,
-) {
-    let (m, n) = (c.nrows(), c.ncols());
-    let k = if trans_a == MatrixOp::NoTrans {
-        a.ncols()
-    } else {
-        a.nrows()
-    };
+#[cfg(feature = "backend-blas")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Blas;
 
-    if m * n * k < 16_000 {
-        return naive_gemm(alpha, (a, trans_a), (b, trans_b), beta, c);
-    }
+#[cfg(feature = "backend-matrixmultiply")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MatrixMultiplyCrate;
 
-    #[cfg(feature = "blas")]
-    if (m | n | k) <= c_int::MAX as usize {
-        unsafe {
-            cblas_sgemm(
-                CblasRowMajor,
-                CBLAS_TRANSPOSE::from(trans_a),
-                CBLAS_TRANSPOSE::from(trans_b),
-                m as c_int,
-                n as c_int,
-                k as c_int,
-                alpha,
-                a.as_slice().as_ptr(),
-                a.ncols() as c_int,
-                b.as_slice().as_ptr(),
-                b.ncols() as c_int,
-                beta,
-                c.as_mut_slice().as_mut_ptr(),
-                c.ncols() as c_int,
-            );
-        }
-        return;
-    }
+#[cfg(feature = "backend-gemm")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GemmCrate;
 
-    #[cfg(feature = "faer")]
-    {
-        run_faer(alpha, (a, trans_a), (b, trans_b), beta, c);
-        return;
-    }
-
-    #[cfg(all(feature = "matrixmultiply", not(feature = "faer")))]
-    {
-        let (rsa, csa) = strides(a.ncols(), trans_a);
-        let (rsb, csb) = strides(b.ncols(), trans_b);
-        unsafe {
-            matrixmultiply::sgemm(
-                m,
-                k,
-                n,
-                alpha,
-                a.as_slice().as_ptr(),
-                rsa,
-                csa,
-                b.as_slice().as_ptr(),
-                rsb,
-                csb,
-                beta,
-                c.as_mut_slice().as_mut_ptr(),
-                c.ncols() as isize,
-                1,
-            );
-        }
-        return;
-    }
-
-    #[cfg(not(any(feature = "faer", feature = "matrixmultiply", feature = "blas")))]
-    naive_gemm(alpha, (a, trans_a), (b, trans_b), beta, c);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cutoff<Small, Large> {
+    cutoff: usize,
+    small: Small,
+    large: Large,
 }
 
-fn gemm_f64(
-    alpha: f64,
-    (a, trans_a): (MatrixView<'_, f64>, MatrixOp),
-    (b, trans_b): (MatrixView<'_, f64>, MatrixOp),
-    beta: f64,
-    mut c: MatrixViewMut<'_, f64>,
-) {
-    let (m, n) = (c.nrows(), c.ncols());
-    let k = if trans_a == MatrixOp::NoTrans {
-        a.ncols()
-    } else {
-        a.nrows()
-    };
-
-    if m * n * k < 16_000 {
-        return naive_gemm(alpha, (a, trans_a), (b, trans_b), beta, c);
-    }
-
-    #[cfg(feature = "blas")]
-    if (m | n | k) <= c_int::MAX as usize {
-        unsafe {
-            cblas_dgemm(
-                CblasRowMajor,
-                CBLAS_TRANSPOSE::from(trans_a),
-                CBLAS_TRANSPOSE::from(trans_b),
-                m as c_int,
-                n as c_int,
-                k as c_int,
-                alpha,
-                a.as_slice().as_ptr(),
-                a.ncols() as c_int,
-                b.as_slice().as_ptr(),
-                b.ncols() as c_int,
-                beta,
-                c.as_mut_slice().as_mut_ptr(),
-                c.ncols() as c_int,
-            );
+impl<Small, Large> Cutoff<Small, Large> {
+    #[inline]
+    pub const fn with(cutoff: usize, small: Small, large: Large) -> Self {
+        Self {
+            cutoff,
+            small,
+            large,
         }
-        return;
     }
-
-    #[cfg(feature = "faer")]
-    {
-        run_faer(alpha, (a, trans_a), (b, trans_b), beta, c);
-        return;
-    }
-
-    #[cfg(all(feature = "matrixmultiply", not(feature = "faer")))]
-    {
-        let (rsa, csa) = strides(a.ncols(), trans_a);
-        let (rsb, csb) = strides(b.ncols(), trans_b);
-        unsafe {
-            matrixmultiply::dgemm(
-                m,
-                k,
-                n,
-                alpha,
-                a.as_slice().as_ptr(),
-                rsa,
-                csa,
-                b.as_slice().as_ptr(),
-                rsb,
-                csb,
-                beta,
-                c.as_mut_slice().as_mut_ptr(),
-                c.ncols() as isize,
-                1,
-            );
-        }
-        return;
-    }
-
-    #[cfg(not(any(feature = "faer", feature = "matrixmultiply", feature = "blas")))]
-    naive_gemm(alpha, (a, trans_a), (b, trans_b), beta, c);
 }
 
-#[cfg(feature = "faer")]
-fn run_faer<T: Element + ComplexField>(
-    alpha: T,
-    (a, trans_a): (MatrixView<'_, T>, MatrixOp),
-    (b, trans_b): (MatrixView<'_, T>, MatrixOp),
-    beta: T,
-    mut c: MatrixViewMut<'_, T>,
-) {
-    let (m, n) = (c.nrows(), c.ncols());
-    let k = if trans_a == MatrixOp::NoTrans {
-        a.ncols()
-    } else {
-        a.nrows()
-    };
-
-    let accum = if beta == T::zero() {
-        Accum::Replace
-    } else if beta == T::one() {
-        Accum::Add
-    } else {
-        c.as_mut_slice().iter_mut().for_each(|val| *val *= beta);
-        Accum::Add
-    };
-
-    let a_mat = MatRef::from_row_major_slice(a.as_slice(), a.nrows(), a.ncols());
-    let b_mat = MatRef::from_row_major_slice(b.as_slice(), b.nrows(), b.ncols());
-    let c_mat = MatMut::from_row_major_slice_mut(c.as_mut_slice(), m, n);
-
-    let a_view = match trans_a {
-        MatrixOp::NoTrans => a_mat.as_ref(),
-        MatrixOp::Trans => a_mat.transpose(),
-    };
-    let b_view = match trans_b {
-        MatrixOp::NoTrans => b_mat.as_ref(),
-        MatrixOp::Trans => b_mat.transpose(),
-    };
-
-    matmul(c_mat, accum, a_view, b_view, alpha, Par::Seq);
+impl<Small: Default, Large: Default> Cutoff<Small, Large> {
+    #[inline]
+    pub fn new(cutoff: usize) -> Self {
+        Self {
+            cutoff,
+            small: Small::default(),
+            large: Large::default(),
+        }
+    }
 }
 
-#[cfg(all(feature = "matrixmultiply", not(feature = "faer")))]
 #[inline]
-fn strides(ld: usize, op: MatrixOp) -> (isize, isize) {
+#[track_caller]
+fn check_shapes<T>(
+    (a, ta): (MatrixView<'_, T>, MatrixOp),
+    (b, tb): (MatrixView<'_, T>, MatrixOp),
+    c: &MatrixViewMut<'_, T>,
+) -> [usize; 3] {
+    let [m, k] = op_shape(a.shape(), ta);
+    let [kb, n] = op_shape(b.shape(), tb);
+    assert_eq!(k, kb, "inner dimension mismatch");
+    assert_eq!([m, n], c.shape(), "output shape mismatch");
+    [m, n, k]
+}
+
+/// `(row stride, col stride)` of the logical `op(x)` for a row-major `x` with `ld` columns.
+#[inline]
+#[allow(unused)]
+fn strides(ld: usize, op: MatrixOp) -> (usize, usize) {
     match op {
-        MatrixOp::NoTrans => (ld as isize, 1),
-        MatrixOp::Trans => (1, ld as isize),
+        MatrixOp::NoTrans => (ld, 1),
+        MatrixOp::Trans => (1, ld),
     }
 }
 
-// ============================================================================
-// Fallback Backend (High-Performance Generic Slice Implementation)
-// ============================================================================
+macro_rules! impl_for_blas {
+    ($ty:ty : $fn:ident) => {
+        #[cfg(feature = "backend-blas")]
+        impl GemmBackend<$ty> for Blas {
+            #[inline]
+            #[track_caller]
+            fn gemm(
+                &self,
+                alpha: $ty,
+                (a, ta): (MatrixView<'_, $ty>, MatrixOp),
+                (b, tb): (MatrixView<'_, $ty>, MatrixOp),
+                beta: $ty,
+                mut c: MatrixViewMut<'_, $ty>,
+            ) {
+                let [m, n, k] = check_shapes((a, ta), (b, tb), &c);
 
-/// 100% slice-based generic fallback GEMM.
-/// Uses strict `MatrixView` and cache-friendly iteration, avoiding raw ptr arith.
-pub fn naive_gemm<T: Element>(
-    alpha: T,
-    (a, trans_a): (MatrixView<'_, T>, MatrixOp),
-    (b, trans_b): (MatrixView<'_, T>, MatrixOp),
-    beta: T,
-    mut c: MatrixViewMut<'_, T>,
-) {
-    let (m, n) = (c.nrows(), c.ncols());
-    let k = if trans_a == MatrixOp::NoTrans {
-        a.ncols()
-    } else {
-        a.nrows()
+                assert!(
+                    (m | n | k) <= core::ffi::c_int::MAX as usize,
+                    "Matrix dimension too large for BLAS"
+                );
+
+                unsafe {
+                    cblas_sys::$fn(
+                        cblas_sys::CblasRowMajor,
+                        ta.into(),
+                        tb.into(),
+                        m as _,
+                        n as _,
+                        k as _,
+                        alpha,
+                        a.as_ptr(),
+                        a.ncols() as _,
+                        b.as_ptr(),
+                        b.ncols() as _,
+                        beta,
+                        c.as_mut_ptr(),
+                        c.ncols() as _,
+                    );
+                }
+            }
+        }
     };
-    let ldc = c.ncols();
+}
 
-    let a_slice = a.as_slice();
-    let b_slice = b.as_slice();
-    let c_slice = c.as_mut_slice();
+impl_for_blas!(f32: cblas_sgemm);
+impl_for_blas!(f64: cblas_dgemm);
 
-    // Scale C by beta (handling beta == 0 properly to overwrite NaNs)
-    let zero = T::zero();
-    for i in 0..m {
-        // Safe indexing: dimensions validated before function logic
-        let c_row = unsafe { c_slice.get_unchecked_mut(i * ldc..(i + 1) * ldc) };
-        if beta == zero {
-            c_row.fill(zero);
-        } else if beta != T::one() {
-            c_row.iter_mut().for_each(|val| *val *= beta);
+macro_rules! impl_for_matrixmultiply_crate {
+    ($ty:ty : $fn:ident) => {
+        #[cfg(feature = "backend-matrixmultiply")]
+        impl GemmBackend<$ty> for MatrixMultiplyCrate {
+            #[inline]
+            #[track_caller]
+            fn gemm(
+                &self,
+                alpha: $ty,
+                (a, ta): (MatrixView<'_, $ty>, MatrixOp),
+                (b, tb): (MatrixView<'_, $ty>, MatrixOp),
+                beta: $ty,
+                mut c: MatrixViewMut<'_, $ty>,
+            ) {
+                let [m, n, k] = check_shapes((a, ta), (b, tb), &c);
+
+                let (rsa, csa) = strides(a.ncols(), ta);
+                let (rsb, csb) = strides(b.ncols(), tb);
+
+                unsafe {
+                    matrixmultiply::$fn(
+                        m,
+                        k,
+                        n,
+                        alpha,
+                        a.as_ptr(),
+                        rsa as _,
+                        csa as _,
+                        b.as_ptr(),
+                        rsb as _,
+                        csb as _,
+                        beta,
+                        c.as_mut_ptr(),
+                        c.ncols() as _,
+                        1,
+                    );
+                }
+            }
+        }
+    };
+}
+
+impl_for_matrixmultiply_crate!(f32: sgemm);
+impl_for_matrixmultiply_crate!(f64: dgemm);
+
+macro_rules! impl_for_gemm_crate {
+    (#[$meta:meta] $ty:ty) => {
+        #[$meta]
+        impl GemmBackend<$ty> for GemmCrate {
+            #[inline]
+            #[track_caller]
+            fn gemm(
+                &self,
+                alpha: $ty,
+                (a, ta): (MatrixView<'_, $ty>, MatrixOp),
+                (b, tb): (MatrixView<'_, $ty>, MatrixOp),
+                beta: $ty,
+                mut c: MatrixViewMut<'_, $ty>,
+            ) {
+                let [m, n, k] = check_shapes((a, ta), (b, tb), &c);
+
+                let (rsa, csa) = strides(a.ncols(), ta);
+                let (rsb, csb) = strides(b.ncols(), tb);
+
+                unsafe {
+                    gemm::gemm(
+                        m,
+                        n,
+                        k,
+                        c.as_mut_ptr(),
+                        1,
+                        c.ncols() as _,
+                        beta != num_traits::Zero::zero(),
+                        a.as_ptr(),
+                        csa as _,
+                        rsa as _,
+                        b.as_ptr(),
+                        csb as _,
+                        rsb as _,
+                        alpha,
+                        beta,
+                        false,
+                        false,
+                        false,
+                        gemm::Parallelism::None,
+                    );
+                }
+            }
+        }
+    };
+}
+
+impl_for_gemm_crate!(
+    #[cfg(feature = "backend-gemm")]
+    f32
+);
+impl_for_gemm_crate!(
+    #[cfg(feature = "backend-gemm")]
+    f64
+);
+impl_for_gemm_crate!(
+    #[cfg(all(feature = "backend-gemm", feature = "f16"))]
+    half::f16
+);
+impl_for_gemm_crate!(
+    #[cfg(all(feature = "backend-gemm", feature = "f16"))]
+    half::bf16
+);
+
+impl<T, Small: GemmBackend<T>, Large: GemmBackend<T>> GemmBackend<T> for Cutoff<Small, Large> {
+    #[inline]
+    #[track_caller]
+    fn gemm(
+        &self,
+        alpha: T,
+        a: (MatrixView<'_, T>, MatrixOp),
+        b: (MatrixView<'_, T>, MatrixOp),
+        beta: T,
+        c: MatrixViewMut<'_, T>,
+    ) {
+        let [m, n, k] = check_shapes(a, b, &c);
+
+        if m.saturating_mul(n).saturating_mul(k) <= self.cutoff {
+            self.small.gemm(alpha, a, b, beta, c);
+        } else {
+            self.large.gemm(alpha, a, b, beta, c);
         }
     }
+}
 
-    if alpha == zero {
-        return;
-    }
+impl<T: Element> GemmBackend<T> for Naive {
+    #[inline]
+    #[track_caller]
+    fn gemm(
+        &self,
+        alpha: T,
+        (a, ta): (MatrixView<'_, T>, MatrixOp),
+        (b, tb): (MatrixView<'_, T>, MatrixOp),
+        beta: T,
+        mut c: MatrixViewMut<'_, T>,
+    ) {
+        let [m, n, k] = check_shapes((a, ta), (b, tb), &c);
 
-    let (rsa, csa) = match trans_a {
-        MatrixOp::NoTrans => (a.ncols(), 1),
-        MatrixOp::Trans => (1, a.ncols()),
-    };
-    let (rsb, csb) = match trans_b {
-        MatrixOp::NoTrans => (b.ncols(), 1),
-        MatrixOp::Trans => (1, b.ncols()),
-    };
+        if beta.is_zero() {
+            c.fill(T::zero());
+        } else if beta != T::one() {
+            c *= beta;
+        }
 
-    // Cache-friendly row-major accumulation (i -> p -> j)
-    for i in 0..m {
-        let c_row = unsafe { c_slice.get_unchecked_mut(i * ldc..(i + 1) * ldc) };
-        for p in 0..k {
-            let a_val = alpha * unsafe { *a_slice.get_unchecked(i * rsa + p * csa) };
-            for j in 0..n {
-                // Vectorizer-friendly inner loop (bounds checks elided via get_unchecked)
-                unsafe {
-                    *c_row.get_unchecked_mut(j) +=
-                        a_val * *b_slice.get_unchecked(p * rsb + j * csb);
+        if alpha.is_zero() {
+            return;
+        }
+
+        let (a, b, c) = (a.as_slice(), b.as_slice(), c.as_mut_slice());
+
+        match (ta, tb) {
+            (MatrixOp::NoTrans, MatrixOp::Trans) => {
+                for (c_row, a_row) in zip(c.chunks_exact_mut(n), a.chunks_exact(k)) {
+                    for (cij, b_row) in zip(c_row, b.chunks_exact(k)) {
+                        *cij += alpha * dot_slice(a_row, b_row);
+                    }
+                }
+            }
+            (_, MatrixOp::NoTrans) => {
+                let (rsa, csa) = match ta {
+                    MatrixOp::NoTrans => (k, 1),
+                    MatrixOp::Trans => (1, m),
+                };
+
+                for (i, c_row) in c.chunks_exact_mut(n).enumerate() {
+                    for (p, b_row) in b.chunks_exact(n).enumerate() {
+                        // SAFETY: i < m and p < k, and (rsa, csa) index the m x k logical view of
+                        // `a`, which has exactly m * k elements (validated by `check_shapes`).
+                        let a_ip = alpha * unsafe { *a.get_unchecked(i * rsa + p * csa) };
+                        axpy_slice(a_ip, b_row, c_row);
+                    }
+                }
+            }
+            (MatrixOp::Trans, MatrixOp::Trans) => {
+                for (i, c_row) in c.chunks_exact_mut(n).enumerate() {
+                    for p in 0..k {
+                        // SAFETY: i < m, p < k, j < n; a has k * m elements, b has n * k.
+                        let a_ip = alpha * unsafe { *a.get_unchecked(p * m + i) };
+                        for (j, cj) in c_row.iter_mut().enumerate() {
+                            *cj += a_ip * unsafe { *b.get_unchecked(j * k + p) };
+                        }
+                    }
                 }
             }
         }

@@ -307,7 +307,7 @@ impl<T: Element> GemmBackend<T> for Naive {
         beta: T,
         mut c: MatrixViewMut<'_, T>,
     ) {
-        let [m, n, k] = check_shapes((a, ta), (b, tb), &c);
+        let _ = check_shapes((a, ta), (b, tb), &c);
 
         if beta.is_zero() {
             c.fill(T::zero());
@@ -319,40 +319,42 @@ impl<T: Element> GemmBackend<T> for Naive {
             return;
         }
 
-        let (a, b, c) = (a.as_slice(), b.as_slice(), c.as_mut_slice());
-
         match (ta, tb) {
             (MatrixOp::NoTrans, MatrixOp::Trans) => {
-                for (c_row, a_row) in zip(c.chunks_exact_mut(n), a.chunks_exact(k)) {
-                    for (cij, b_row) in zip(c_row, b.chunks_exact(k)) {
-                        *cij += alpha * dot_slice(a_row, b_row);
+                for (c_row, a_row) in zip(c.chunks::<1>(), a.chunks::<1>()) {
+                    for (cij, b_row) in zip(c_row.into_mut_slice(), b.chunks::<1>()) {
+                        *cij += alpha * dot_slice(a_row.as_slice(), b_row.as_slice());
                     }
                 }
             }
-            (_, MatrixOp::NoTrans) => {
-                let (rsa, csa) = match ta {
-                    MatrixOp::NoTrans => (k, 1),
-                    MatrixOp::Trans => (1, m),
-                };
-
-                for (i, c_row) in c.chunks_exact_mut(n).enumerate() {
-                    for (p, b_row) in b.chunks_exact(n).enumerate() {
-                        // SAFETY: i < m and p < k, and (rsa, csa) index the m x k logical view of
-                        // `a`, which has exactly m * k elements (validated by `check_shapes`).
-                        let a_ip = alpha * unsafe { *a.get_unchecked(i * rsa + p * csa) };
-                        axpy_slice(a_ip, b_row, c_row);
+            (MatrixOp::NoTrans, MatrixOp::NoTrans) => {
+                for (c_row, a_row) in zip(c.chunks::<1>(), a.chunks::<1>()) {
+                    let c_row = c_row.into_mut_slice();
+                    for (&a_ip, b_row) in zip(a_row.as_slice(), b.chunks::<1>()) {
+                        axpy_slice(alpha * a_ip, b_row.as_slice(), c_row);
+                    }
+                }
+            }
+            (MatrixOp::Trans, MatrixOp::NoTrans) => {
+                for (a_row, b_row) in zip(a.chunks::<1>(), b.chunks::<1>()) {
+                    let b_row = b_row.as_slice();
+                    for (&a_pi, c_row) in zip(a_row.as_slice(), c.view_mut().chunks::<1>()) {
+                        axpy_slice(alpha * a_pi, b_row, c_row.into_mut_slice());
                     }
                 }
             }
             (MatrixOp::Trans, MatrixOp::Trans) => {
-                for (i, c_row) in c.chunks_exact_mut(n).enumerate() {
-                    for p in 0..k {
-                        // SAFETY: i < m, p < k; a has k * m elements.
-                        let a_ip = alpha * unsafe { *a.get_unchecked(p * m + i) };
-                        for (j, cj) in c_row.iter_mut().enumerate() {
-                            // SAFETY: p < k, j < n; b has n * k elements.
-                            *cj += a_ip * unsafe { *b.get_unchecked(j * k + p) };
+                // Both `a` ([k, m]) and `b` ([n, k]) are contiguous along their inner
+                // dimension if we dot `a`'s columns (`[m, k]`? No, `a` is `[k, m]`), so
+                // either keep `a` strided or dot `b`'s rows (`[n, k]`):
+                for (i, c_row) in c.chunks::<1>().enumerate() {
+                    for (cij, b_row) in zip(c_row.into_mut_slice(), b.chunks::<1>()) {
+                        let mut sum = T::zero();
+                        for (a_row, &b_jp) in zip(a.chunks::<1>(), b_row.as_slice()) {
+                            // `a_row` has length `m` and `i < m` (from `c.chunks::<1>()`).
+                            sum += a_row.as_slice()[i] * b_jp;
                         }
+                        *cij += alpha * sum;
                     }
                 }
             }

@@ -1,7 +1,10 @@
 //! BLAS-style Level-1, Level-2, and Level-3 dense linear algebra routines over
 //! [`VectorView`], [`VectorViewMut`], [`MatrixView`], and [`MatrixViewMut`].
 
-use crate::{MatrixView, MatrixViewMut, TensorView, TensorViewMut, VectorView, VectorViewMut};
+use crate::{
+    MatrixView, MatrixViewMut, TensorView, TensorViewMut, VectorView, VectorViewMut,
+    unchecked_shape_len,
+};
 
 use core::array;
 use core::iter::zip;
@@ -154,16 +157,16 @@ pub fn gemv<T: Element>(
 
     match ta {
         MatrixOp::NoTrans => {
-            for (yi, a_row) in zip(y_slice, a_slice.chunks_exact(a.ncols())) {
-                *yi += alpha * dot_slice(a_row, x_slice);
+            for (yi, a_row) in zip(y_slice, a.chunks::<1>()) {
+                *yi += alpha * dot_slice(a_row.as_slice(), x_slice);
             }
         }
         MatrixOp::Trans => {
             let ncols = a.ncols();
-            let mut x_blocks = x_slice.chunks_exact(4);
+            let (x_blocks, x_rem) = x_slice.as_chunks::<4>();
             let mut a_blocks = a_slice.chunks_exact(4 * ncols);
 
-            for (xb, ab) in zip(&mut x_blocks, &mut a_blocks) {
+            for (xb, ab) in zip(x_blocks, &mut a_blocks) {
                 let ax0 = alpha * xb[0];
                 let ax1 = alpha * xb[1];
                 let ax2 = alpha * xb[2];
@@ -180,10 +183,7 @@ pub fn gemv<T: Element>(
                 }
             }
 
-            for (&xp, a_row) in zip(
-                x_blocks.remainder(),
-                a_blocks.remainder().chunks_exact(ncols),
-            ) {
+            for (&xp, a_row) in zip(x_rem, a_blocks.remainder().chunks_exact(ncols)) {
                 axpy_slice(alpha * xp, a_row, y_slice);
             }
         }
@@ -269,14 +269,14 @@ pub fn sum_axis<T: Element, const N: usize, const M: usize>(
     }
 
     let axis_len = x_shape[axis];
-    let inner = crate::shape_len(&x_shape[axis + 1..]);
+    // SAFETY: this is a subslice of `x_shape`
+    let inner = unsafe { unchecked_shape_len(&x_shape[axis + 1..]) };
     let x_slice = x.as_slice();
     let y_slice = y.as_mut_slice();
 
     if inner == 1 {
-        // `axis == N - 1`: each output element is the sum of a contiguous row of length `axis_len`.
-        for (yi, row) in zip(y_slice, x_slice.chunks_exact(axis_len)) {
-            *yi += sum_slice(row);
+        for (yi, row) in zip(y_slice, x.chunks::<1>()) {
+            *yi += sum_slice(row.as_slice());
         }
     } else if axis == 0 {
         sum_rows_into(x_slice, inner, y_slice);
@@ -303,7 +303,7 @@ pub fn ger<T: Element>(
     alpha: T,
     x: VectorView<'_, T>,
     y: VectorView<'_, T>,
-    mut a: MatrixViewMut<'_, T>,
+    a: MatrixViewMut<'_, T>,
 ) {
     assert_eq!(
         [x.len(), y.len()],
@@ -315,8 +315,19 @@ pub fn ger<T: Element>(
         return;
     }
 
-    let (x_slice, y_slice, a_slice) = (x.as_slice(), y.as_slice(), a.as_mut_slice());
-    for (&xi, a_row) in zip(x_slice, a_slice.chunks_exact_mut(y_slice.len())) {
-        axpy_slice(alpha * xi, y_slice, a_row);
+    for (&xi, a_row) in zip(x.as_slice(), a.chunks::<1>()) {
+        axpy_slice(alpha * xi, y.as_slice(), a_row.into_mut_slice());
     }
 }
+
+// pub fn assign0(mut a: VectorViewMut<'_, f32>, b: ScalarView<'_, f32>) {
+//     a.assign(b);
+// }
+
+// pub fn addassign0(mut a: VectorViewMut<'_, f32>, b: ScalarView<'_, f32>) {
+//     a += b;
+// }
+
+// pub fn axpy0(alpha: f32, a: ScalarView<'_, f32>, b: VectorViewMut<'_, f32>) {
+//     axpy(alpha, a, b);
+// }

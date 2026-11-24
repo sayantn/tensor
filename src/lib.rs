@@ -56,12 +56,19 @@ pub mod linalg;
 // ============================================================================
 
 #[inline]
-fn shape_len(shape: &[usize]) -> usize {
-    shape.iter().product()
+const unsafe fn unchecked_shape_len(shape: &[usize]) -> usize {
+    let mut prod = 1usize;
+    let mut i = 0;
+    while i < shape.len() {
+        // SAFETY: Caller guarantees the product of `shape` does not overflow `usize`.
+        prod = unsafe { prod.unchecked_mul(shape[i]) };
+        i += 1;
+    }
+    prod
 }
 
 #[inline]
-fn checked_shape_len(shape: &[usize]) -> usize {
+fn shape_len(shape: &[usize]) -> usize {
     shape
         .iter()
         .fold(1, |acc, &x| acc.checked_mul(x).expect("shape overflow"))
@@ -75,7 +82,7 @@ fn validate_shape(buffer_len: usize, shape: &[usize]) {
     );
     assert_eq!(
         buffer_len,
-        checked_shape_len(shape),
+        shape_len(shape),
         "buffer len ({buffer_len}) does not match shape {shape:?}",
     );
 }
@@ -168,9 +175,7 @@ macro_rules! impl_assign_ops {
         impl<T: Copy + $trait<T>, const N: usize> $trait<T> for TensorViewMut<'_, T, N> {
             #[inline]
             fn $method(&mut self, rhs: T) {
-                for a in self.as_mut_slice() {
-                    *a $op rhs;
-                }
+                self.$method(ScalarView::scalar(&rhs))
             }
         }
 

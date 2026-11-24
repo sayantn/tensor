@@ -7,7 +7,7 @@ use alloc::boxed::Box;
 use alloc::{vec, vec::Vec};
 
 use crate::{
-    Matrix, Scalar, TensorView, TensorViewMut, Vector, checked_shape_len, linear_offset,
+    Matrix, Scalar, TensorView, TensorViewMut, Vector, shape_len, linear_offset,
     linear_offset_checked, validate_shape,
 };
 
@@ -65,7 +65,7 @@ impl<T, const N: usize> Tensor<T, N> {
     where
         T: Clone,
     {
-        Self::from_vec(vec![val; checked_shape_len(&shape)], shape)
+        Self::from_vec(vec![val; shape_len(&shape)], shape)
     }
 
     /// Allocates a [`Tensor`] of `shape` filled with `T::default()`.

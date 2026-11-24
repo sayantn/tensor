@@ -81,6 +81,7 @@ const unsafe fn unchecked_shape_len(shape: &[usize]) -> usize {
 }
 
 #[inline]
+#[track_caller]
 fn shape_len(shape: &[usize]) -> usize {
     shape
         .iter()
@@ -88,6 +89,7 @@ fn shape_len(shape: &[usize]) -> usize {
 }
 
 #[inline]
+#[track_caller]
 fn validate_shape(buffer_len: usize, shape: &[usize]) {
     assert!(
         !shape.contains(&0),
@@ -101,6 +103,7 @@ fn validate_shape(buffer_len: usize, shape: &[usize]) {
 }
 
 #[inline]
+#[track_caller]
 fn linear_offset<const N: usize>(shape: &[usize; N], index: &[usize; N]) -> usize {
     zip(shape, index).fold(0, |offset, (&len, &idx)| {
         assert!(idx < len, "index {idx} out of bounds for axis len {len}");
@@ -116,6 +119,7 @@ fn linear_offset_checked<const N: usize>(shape: &[usize; N], index: &[usize; N])
 }
 
 #[inline]
+#[track_caller]
 fn resolve_range<R: RangeBounds<usize>>(range: R, axis_len: usize) -> Range<usize> {
     let start = match range.start_bound() {
         Bound::Included(&s) => s,

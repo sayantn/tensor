@@ -335,6 +335,7 @@ impl<T> Matrix<T> {
 
 impl<T> From<Vec<T>> for Vector<T> {
     #[inline]
+    #[track_caller]
     fn from(value: Vec<T>) -> Self {
         let len = value.len();
         Self::from_vec(value, [len])

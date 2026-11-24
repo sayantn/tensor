@@ -55,11 +55,13 @@ pub(crate) fn axpy_slice<T: Element>(alpha: T, x: &[T], y: &mut [T]) {
     }
 }
 
-/// Computes `y := alpha * x + y` (BLAS Level-1 `axpy`).
+/// Computes `y := alpha * x + y` (BLAS Level-1 `axpy`) with right-aligned
+/// broadcasting on `x`.
 ///
 /// # Panics
 ///
-/// Panics if `x.shape() != y.shape()`.
+/// Panics at compile time if `M > N`, or at runtime if `x.shape()` does not
+/// match `&y.shape()[N - M..]`.
 #[inline]
 #[track_caller]
 pub fn axpy<T: Element, const N: usize, const M: usize>(
@@ -164,26 +166,30 @@ pub fn gemv<T: Element>(
         MatrixOp::Trans => {
             let ncols = a.ncols();
             let (x_blocks, x_rem) = x_slice.as_chunks::<4>();
-            let mut a_blocks = a_slice.chunks_exact(4 * ncols);
+            let rem_a = if x_blocks.is_empty() {
+                a_slice
+            } else {
+                let mut a_blocks = a_slice.chunks_exact(4 * ncols);
+                for (xb, ab) in zip(x_blocks, &mut a_blocks) {
+                    let ax0 = alpha * xb[0];
+                    let ax1 = alpha * xb[1];
+                    let ax2 = alpha * xb[2];
+                    let ax3 = alpha * xb[3];
 
-            for (xb, ab) in zip(x_blocks, &mut a_blocks) {
-                let ax0 = alpha * xb[0];
-                let ax1 = alpha * xb[1];
-                let ax2 = alpha * xb[2];
-                let ax3 = alpha * xb[3];
+                    let (r0, rest) = ab.split_at(ncols);
+                    let (r1, rest) = rest.split_at(ncols);
+                    let (r2, r3) = rest.split_at(ncols);
 
-                let (r0, rest) = ab.split_at(ncols);
-                let (r1, rest) = rest.split_at(ncols);
-                let (r2, r3) = rest.split_at(ncols);
-
-                for (yj, ((&a0, &a1), (&a2, &a3))) in
-                    zip(&mut *y_slice, zip(zip(r0, r1), zip(r2, r3)))
-                {
-                    *yj += (ax0 * a0 + ax1 * a1) + (ax2 * a2 + ax3 * a3);
+                    for (yj, ((&a0, &a1), (&a2, &a3))) in
+                        zip(&mut *y_slice, zip(zip(r0, r1), zip(r2, r3)))
+                    {
+                        *yj += (ax0 * a0 + ax1 * a1) + (ax2 * a2 + ax3 * a3);
+                    }
                 }
-            }
+                a_blocks.remainder()
+            };
 
-            for (&xp, a_row) in zip(x_rem, a_blocks.remainder().chunks_exact(ncols)) {
+            for (&xp, a_row) in zip(x_rem, rem_a.chunks_exact(ncols)) {
                 axpy_slice(alpha * xp, a_row, y_slice);
             }
         }
@@ -219,18 +225,23 @@ fn sum_rows_into<T: Element>(x: &[T], ncols: usize, y: &mut [T]) {
     debug_assert_eq!(y.len(), ncols);
     debug_assert_eq!(x.len() % ncols, 0);
 
-    let mut blocks = x.chunks_exact(4 * ncols);
-    for block in &mut blocks {
-        let (r0, rest) = block.split_at(ncols);
-        let (r1, rest) = rest.split_at(ncols);
-        let (r2, r3) = rest.split_at(ncols);
+    let rem = if let Some(block_len) = ncols.checked_mul(4) {
+        let mut blocks = x.chunks_exact(block_len);
+        for block in &mut blocks {
+            let (r0, rest) = block.split_at(ncols);
+            let (r1, rest) = rest.split_at(ncols);
+            let (r2, r3) = rest.split_at(ncols);
 
-        for (y, ((&r0, &r1), (&r2, &r3))) in zip(&mut *y, zip(zip(r0, r1), zip(r2, r3))) {
-            *y += (r0 + r1) + (r2 + r3);
+            for (y, ((&r0, &r1), (&r2, &r3))) in zip(&mut *y, zip(zip(r0, r1), zip(r2, r3))) {
+                *y += (r0 + r1) + (r2 + r3);
+            }
         }
-    }
+        blocks.remainder()
+    } else {
+        x
+    };
 
-    for row in blocks.remainder().chunks_exact(ncols) {
+    for row in rem.chunks_exact(ncols) {
         for (yj, &xij) in zip(&mut *y, row) {
             *yj += xij;
         }
@@ -275,8 +286,8 @@ pub fn sum_axis<T: Element, const N: usize, const M: usize>(
     let y_slice = y.as_mut_slice();
 
     if inner == 1 {
-        for (yi, row) in zip(y_slice, x.chunks::<1>()) {
-            *yi += sum_slice(row.as_slice());
+        for (yi, row) in zip(y_slice, x_slice.chunks_exact(axis_len)) {
+            *yi += sum_slice(row);
         }
     } else if axis == 0 {
         sum_rows_into(x_slice, inner, y_slice);

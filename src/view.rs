@@ -23,6 +23,11 @@ pub struct TensorView<'a, T, const N: usize> {
     _marker: PhantomData<&'a T>,
 }
 
+// SAFETY: `TensorView<'a, T, N>` acts identically to `&'a [T]`.
+unsafe impl<T: Sync, const N: usize> Send for TensorView<'_, T, N> {}
+// SAFETY: `TensorView<'a, T, N>` provides only shared immutable access to `T`.
+unsafe impl<T: Sync, const N: usize> Sync for TensorView<'_, T, N> {}
+
 impl<T, const N: usize> Clone for TensorView<'_, T, N> {
     #[inline]
     fn clone(&self) -> Self {
@@ -254,7 +259,7 @@ impl<T, const N: usize> Index<[usize; N]> for TensorView<'_, T, N> {
     #[inline]
     fn index(&self, index: [usize; N]) -> &Self::Output {
         let off = linear_offset(&self.shape, &index);
-        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
+        // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`,
         // so `off < self.len()` and `ptr` stays within the valid read span.
         let ptr = unsafe { self.ptr.add(off) };
         // SAFETY: `ptr` points to a valid, initialized `T` for lifetime `'a`.

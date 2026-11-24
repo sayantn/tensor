@@ -20,6 +20,11 @@ pub struct TensorViewMut<'a, T, const N: usize> {
     _marker: PhantomData<&'a mut T>,
 }
 
+// SAFETY: `TensorViewMut<'a, T, N>` acts identically to `&'a mut [T]`.
+unsafe impl<T: Send, const N: usize> Send for TensorViewMut<'_, T, N> {}
+// SAFETY: `TensorViewMut<'a, T, N>` acts identically to `&'a mut [T]`.
+unsafe impl<T: Sync, const N: usize> Sync for TensorViewMut<'_, T, N> {}
+
 impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     #[inline]
     pub(crate) const fn new(shape: [usize; N], data: &'a mut [T]) -> Self {
@@ -323,7 +328,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     #[must_use]
     pub fn get(&self, index: [usize; N]) -> Option<&T> {
         let off = linear_offset_checked(&self.shape, &index)?;
-        // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`,
+        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
         // so `off < self.len()` and `ptr` stays within the exclusive span.
         let ptr = unsafe { self.ptr.add(off) };
         // SAFETY: `ptr` points to a valid, initialized, exclusively borrowed `T`.
@@ -336,7 +341,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     #[must_use]
     pub fn get_mut(&mut self, index: [usize; N]) -> Option<&mut T> {
         let off = linear_offset_checked(&self.shape, &index)?;
-        // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`,
+        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
         // so `off < self.len()` and `ptr` stays within the exclusive span.
         let mut ptr = unsafe { self.ptr.add(off) };
         // SAFETY: `ptr` points to a valid, initialized, exclusively borrowed `T`.

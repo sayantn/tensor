@@ -319,15 +319,3 @@ pub fn ger<T: Element>(
         axpy_slice(alpha * xi, y.as_slice(), a_row.into_mut_slice());
     }
 }
-
-// pub fn assign0(mut a: VectorViewMut<'_, f32>, b: ScalarView<'_, f32>) {
-//     a.assign(b);
-// }
-
-// pub fn addassign0(mut a: VectorViewMut<'_, f32>, b: ScalarView<'_, f32>) {
-//     a += b;
-// }
-
-// pub fn axpy0(alpha: f32, a: ScalarView<'_, f32>, b: VectorViewMut<'_, f32>) {
-//     axpy(alpha, a, b);
-// }

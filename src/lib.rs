@@ -232,7 +232,7 @@ impl_assign_ops!(MulAssign, mul_assign, *=);
 impl_assign_ops!(DivAssign, div_assign, /=);
 
 macro_rules! impl_binary_into_ops {
-    ($fn_name:ident, $trait:ident, $method:ident, $doc:expr) => {
+    ($fn_name:ident, $trait:ident, $op:tt, $doc:expr) => {
         #[doc = $doc]
         ///
         /// # Panics
@@ -267,7 +267,7 @@ macro_rules! impl_binary_into_ops {
                     out_chunk.into_mut_slice(),
                     zip(lhs_chunk.as_slice(), rhs_slice),
                 ) {
-                    *o = a.$method(b);
+                    *o = a $op b;
                 }
             }
         }
@@ -277,27 +277,178 @@ macro_rules! impl_binary_into_ops {
 impl_binary_into_ops!(
     add_into,
     Add,
-    add,
+    +,
     "Computes `out := lhs + rhs` elementwise with right-aligned broadcasting on `rhs`."
 );
 impl_binary_into_ops!(
     sub_into,
     Sub,
-    sub,
+    -,
     "Computes `out := lhs - rhs` elementwise with right-aligned broadcasting on `rhs`."
 );
 impl_binary_into_ops!(
     mul_into,
     Mul,
-    mul,
+    *,
     "Computes `out := lhs * rhs` elementwise with right-aligned broadcasting on `rhs`."
 );
 impl_binary_into_ops!(
     div_into,
     Div,
-    div,
+    /,
     "Computes `out := lhs / rhs` elementwise with right-aligned broadcasting on `rhs`."
 );
+
+macro_rules! impl_owned_binary_ops {
+    ($trait:ident, $method:ident, $assign_trait:ident, $op:tt) => {
+        // Tensor<T, N> + RHS (reuses `self` buffer in place; supports broadcasting M <= N)
+        impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
+            $trait<TensorView<'_, T, M>> for Tensor<T, N>
+        {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            fn $method(mut self, rhs: TensorView<'_, T, M>) -> Self::Output {
+                self $op rhs;
+                self
+            }
+        }
+
+        impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
+            $trait<&Tensor<T, M>> for Tensor<T, N>
+        {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            fn $method(self, rhs: &Tensor<T, M>) -> Self::Output {
+                self.$method(rhs.view())
+            }
+        }
+
+        impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
+            $trait<&TensorView<'_, T, M>> for Tensor<T, N>
+        {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            fn $method(self, rhs: &TensorView<'_, T, M>) -> Self::Output {
+                self.$method(*rhs)
+            }
+        }
+
+        impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
+            $trait<&TensorViewMut<'_, T, M>> for Tensor<T, N>
+        {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            fn $method(self, rhs: &TensorViewMut<'_, T, M>) -> Self::Output {
+                self.$method(rhs.view())
+            }
+        }
+
+        impl<T: Copy + $assign_trait<T>, const N: usize> $trait<T> for Tensor<T, N> {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            fn $method(mut self, rhs: T) -> Self::Output {
+                self $op rhs;
+                self
+            }
+        }
+
+        // Borrowed LHS (rank M <= N) + owned Tensor<T, N> (reuses `rhs` buffer in place!)
+        impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
+            $trait<Tensor<T, N>> for TensorView<'_, T, M>
+        {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            fn $method(self, mut rhs: Tensor<T, N>) -> Self::Output {
+                const {
+                    assert!(
+                        M <= N,
+                        "cannot broadcast higher-rank tensor into lower-rank tensor"
+                    );
+                }
+                assert_eq!(
+                    self.shape(),
+                    rhs.shape()[N - M..],
+                    "broadcast shape mismatch"
+                );
+
+                let lhs_slice = self.as_slice();
+                rhs.view_mut().chunks::<M>().for_each(|chunk| {
+                    for (&a, b) in zip(lhs_slice, chunk.into_mut_slice()) {
+                        *b = a.$method(*b);
+                    }
+                });
+                rhs
+            }
+        }
+
+        impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
+            $trait<Tensor<T, N>> for &Tensor<T, M>
+        {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            fn $method(self, rhs: Tensor<T, N>) -> Self::Output {
+                self.view().$method(rhs)
+            }
+        }
+
+        impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
+            $trait<Tensor<T, N>> for &TensorView<'_, T, M>
+        {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            fn $method(self, rhs: Tensor<T, N>) -> Self::Output {
+                (*self).$method(rhs)
+            }
+        }
+
+        impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
+            $trait<Tensor<T, N>> for &TensorViewMut<'_, T, M>
+        {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            fn $method(self, rhs: Tensor<T, N>) -> Self::Output {
+                self.view().$method(rhs)
+            }
+        }
+    };
+}
+
+impl_owned_binary_ops!(Add, add, AddAssign, +=);
+impl_owned_binary_ops!(Sub, sub, SubAssign, -=);
+impl_owned_binary_ops!(Mul, mul, MulAssign, *=);
+impl_owned_binary_ops!(Div, div, DivAssign, /=);
+
+macro_rules! impl_scalar_lhs_ops {
+    ($trait:ident, $method:ident => $($ty:ty),+ $(,)?) => {
+        $(
+            impl<const N: usize> $trait<Tensor<$ty, N>> for $ty {
+                type Output = Tensor<$ty, N>;
+
+                #[inline]
+                fn $method(self, mut rhs: Tensor<$ty, N>) -> Self::Output {
+                    for b in rhs.as_mut_slice() {
+                        *b = $trait::$method(self, *b);
+                    }
+                    rhs
+                }
+            }
+        )+
+    };
+}
+
+impl_scalar_lhs_ops!(Add, add => f32, f64, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+impl_scalar_lhs_ops!(Sub, sub => f32, f64, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+impl_scalar_lhs_ops!(Mul, mul => f32, f64, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+impl_scalar_lhs_ops!(Div, div => f32, f64, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
 
 // ============================================================================
 // Display

@@ -344,9 +344,7 @@ impl<T: Element> GemmBackend<T> for Naive {
                 }
             }
             (MatrixOp::Trans, MatrixOp::Trans) => {
-                // Both `a` ([k, m]) and `b` ([n, k]) are contiguous along their inner
-                // dimension if we dot `a`'s columns (`[m, k]`? No, `a` is `[k, m]`), so
-                // either keep `a` strided or dot `b`'s rows (`[n, k]`):
+                // `a` is `[k, m]` and `b` is `[n, k]`: dot column `i` of `a` with row `j` of `b`.
                 for (i, c_row) in c.chunks::<1>().enumerate() {
                     for (cij, b_row) in zip(c_row.into_mut_slice(), b.chunks::<1>()) {
                         let mut sum = T::zero();

@@ -477,3 +477,137 @@ fn gemm_f16_match_naive() {
         assert!((r.to_f32() - g.to_f32()).abs() <= 5e-2);
     }
 }
+#[test]
+fn split_at_disjoint_mutable_views() {
+    let mut m = Matrix::from_vec((0..20).collect(), [5, 4]);
+
+    let (top, bottom) = m.view().split_at(2);
+    assert_eq!(top.shape(), [2, 4]);
+    assert_eq!(bottom.shape(), [3, 4]);
+    assert_eq!(top[[1, 3]], 7);
+    assert_eq!(bottom[[0, 0]], 8);
+
+    // Disjoint mutable halves exercised under miri
+    let (mut top_mut, mut bottom_mut) = m.view_mut().split_at(2);
+    top_mut += 100;
+    bottom_mut *= 2;
+
+    assert_eq!(m[[0, 0]], 100);
+    assert_eq!(m[[1, 3]], 107);
+    assert_eq!(m[[2, 0]], 16);
+    assert_eq!(m[[4, 3]], 38);
+}
+
+#[test]
+fn binary_into_and_owned_ops() {
+    let a = Matrix::from_vec(vec![10.0_f32, 20.0, 30.0, 40.0, 50.0, 60.0], [2, 3]);
+    let b = Vector::from_vec(vec![1.0_f32, 2.0, 3.0], [3]);
+    let mut out = Matrix::zeros([2, 3]);
+
+    // Broadcasted *_into ops
+    a.view().add_into(b.view(), out.view_mut());
+    assert_close_f32(out.as_slice(), &[11.0, 22.0, 33.0, 41.0, 52.0, 63.0], 1e-6);
+
+    a.view().sub_into(b.view(), out.view_mut());
+    assert_close_f32(out.as_slice(), &[9.0, 18.0, 27.0, 39.0, 48.0, 57.0], 1e-6);
+
+    a.view().mul_into(b.view(), out.view_mut());
+    assert_close_f32(
+        out.as_slice(),
+        &[10.0, 40.0, 90.0, 40.0, 100.0, 180.0],
+        1e-6,
+    );
+
+    a.view().div_into(b.view(), out.view_mut());
+    assert_close_f32(out.as_slice(), &[10.0, 10.0, 10.0, 40.0, 25.0, 20.0], 1e-6);
+
+    // Owned LHS + borrowed RHS (in-place reuse, with broadcasting)
+    let r1 = a.clone() + &b;
+    assert_close_f32(r1.as_slice(), &[11.0, 22.0, 33.0, 41.0, 52.0, 63.0], 1e-6);
+
+    // Borrowed LHS (broadcasted) - owned RHS (non-commutative check)
+    let r2 = &b - a.clone();
+    assert_close_f32(
+        r2.as_slice(),
+        &[-9.0, -18.0, -27.0, -39.0, -48.0, -57.0],
+        1e-6,
+    );
+
+    // Scalar LHS and unary Neg
+    let r3 = -(100.0_f32 - a);
+    assert_close_f32(
+        r3.as_slice(),
+        &[-90.0, -80.0, -70.0, -60.0, -50.0, -40.0],
+        1e-6,
+    );
+
+    // Bitwise & unary Not on integers
+    let bits = Vector::from_vec(vec![0b1010_u8, 0b1100], [2]);
+    let masked = (!bits) & 0b0000_1111_u8;
+    assert_eq!(masked.as_slice(), &[0b0101, 0b0011]);
+}
+
+#[test]
+fn gemv_trans_unrolled_4_rows_and_remainder() {
+    // 6x5 matrix -> exercises 1 unrolled 4-row block + 2 remainder rows in MatrixOp::Trans
+    let a = Matrix::from_vec((1..=30).map(|v| v as f32).collect(), [6, 5]);
+    let x = Vector::from_vec(vec![1.0_f32, -2.0, 3.0, -4.0, 5.0, -6.0], [6]);
+    let mut y = Vector::from_vec(vec![0.5_f32; 5], [5]);
+
+    gemv(
+        2.0,
+        (a.view(), MatrixOp::Trans),
+        x.view(),
+        4.0,
+        y.view_mut(),
+    );
+
+    let mut expected = [0.5_f32 * 4.0; 5];
+    for (i, &xi) in x.iter().enumerate() {
+        for (j, ej) in expected.iter_mut().enumerate() {
+            *ej += 2.0 * a[[i, j]] * xi;
+        }
+    }
+    assert_close_f32(y.as_slice(), &expected, 1e-4);
+}
+
+#[test]
+fn sum_axis_3d_all_axes_and_trailing_one() {
+    // 2 x 3 x 4 tensor
+    let x = Tensor::from_vec((1..=24).map(|v| v as f32).collect(), [2, 3, 4]);
+
+    // axis = 0 -> [3, 4]
+    let mut y0 = Matrix::zeros([3, 4]);
+    sum_axis(x.view(), 0, 0.0, y0.view_mut());
+    for j in 0..3 {
+        for k in 0..4 {
+            assert_close_f32(&[y0[[j, k]]], &[x[[0, j, k]] + x[[1, j, k]]], 1e-5);
+        }
+    }
+
+    // axis = 1 (middle axis, 0 < axis < N - 1) -> [2, 4]
+    let mut y1 = Matrix::zeros([2, 4]);
+    sum_axis(x.view(), 1, 0.0, y1.view_mut());
+    for i in 0..2 {
+        for k in 0..4 {
+            let exp = x[[i, 0, k]] + x[[i, 1, k]] + x[[i, 2, k]];
+            assert_close_f32(&[y1[[i, k]]], &[exp], 1e-5);
+        }
+    }
+
+    // axis = 2 (innermost axis, inner == 1) -> [2, 3]
+    let mut y2 = Matrix::zeros([2, 3]);
+    sum_axis(x.view(), 2, 0.0, y2.view_mut());
+    for i in 0..2 {
+        for j in 0..3 {
+            let exp = x[[i, j, 0]] + x[[i, j, 1]] + x[[i, j, 2]] + x[[i, j, 3]];
+            assert_close_f32(&[y2[[i, j]]], &[exp], 1e-5);
+        }
+    }
+
+    // Trailing-1 dimension: [2, 3, 1] summed along axis = 1 -> [2, 1]
+    let x1 = Tensor::from_vec(vec![1.0_f32, 2.0, 3.0, 10.0, 20.0, 30.0], [2, 3, 1]);
+    let mut y_t1 = Matrix::zeros([2, 1]);
+    sum_axis(x1.view(), 1, 0.0, y_t1.view_mut());
+    assert_close_f32(y_t1.as_slice(), &[6.0, 60.0], 1e-5);
+}

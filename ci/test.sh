@@ -11,5 +11,5 @@ else
     export RUSTFLAGS="-l ${BLAS_LIB}${RUSTFLAGS:+ $RUSTFLAGS}"
 fi
 
-cargo test --tests --all-features
+cargo test --all-features
 cargo +nightly miri test --no-default-features --features alloc

@@ -268,42 +268,85 @@ impl_assign_ops!(ShrAssign, shr_assign, >>=);
 
 macro_rules! impl_binary_into_ops {
     ($fn_name:ident, $trait:ident, $op:tt, $doc:expr) => {
-        #[doc = $doc]
-        ///
-        /// # Panics
-        ///
-        /// Panics at compile time if `M > N`, or at runtime if `lhs.shape() != out.shape()`
-        /// or if `rhs.shape()` does not match `&out.shape()[N - M..]`.
-        #[inline]
-        #[track_caller]
-        pub fn $fn_name<T, const N: usize, const M: usize>(
-            lhs: TensorView<'_, T, N>,
-            rhs: TensorView<'_, T, M>,
-            out: TensorViewMut<'_, T, N>,
-        ) where
-            T: Copy + $trait<T, Output = T>,
-        {
-            const {
-                assert!(
-                    M <= N,
-                    "cannot broadcast higher-rank tensor into lower-rank tensor"
-                );
-            }
-            assert_eq!(lhs.shape(), out.shape(), "lhs/output shape mismatch");
-            assert_eq!(
-                out.shape()[N - M..],
-                rhs.shape(),
-                "rhs broadcast shape mismatch"
-            );
-
-            let rhs_slice = rhs.as_slice();
-            for (out_chunk, lhs_chunk) in zip(out.chunks::<M>(), lhs.chunks::<M>()) {
-                for (o, (&a, &b)) in zip(
-                    out_chunk.into_mut_slice(),
-                    zip(lhs_chunk.as_slice(), rhs_slice),
-                ) {
-                    *o = a $op b;
+        impl<T, const N: usize> TensorView<'_, T, N> {
+            #[doc = $doc]
+            ///
+            /// # Panics
+            ///
+            /// Panics at compile time if `M > N`, or at runtime if `self.shape() != out.shape()`
+            /// or if `rhs.shape()` does not match `&out.shape()[N - M..]`.
+            #[inline]
+            #[track_caller]
+            pub fn $fn_name<const M: usize>(
+                self,
+                rhs: TensorView<'_, T, M>,
+                out: TensorViewMut<'_, T, N>,
+            ) where
+                T: Copy + $trait<T, Output = T>,
+            {
+                const {
+                    assert!(
+                        M <= N,
+                        "cannot broadcast higher-rank tensor into lower-rank tensor"
+                    );
                 }
+                assert_eq!(self.shape(), out.shape(), "lhs/output shape mismatch");
+                assert_eq!(
+                    out.shape()[N - M..],
+                    rhs.shape(),
+                    "rhs broadcast shape mismatch"
+                );
+
+                let rhs_slice = rhs.as_slice();
+                for (out_chunk, lhs_chunk) in zip(out.chunks::<M>(), self.chunks::<M>()) {
+                    for (o, (&a, &b)) in zip(
+                        out_chunk.into_mut_slice(),
+                        zip(lhs_chunk.as_slice(), rhs_slice),
+                    ) {
+                        *o = a $op b;
+                    }
+                }
+            }
+        }
+
+        impl<T, const N: usize> TensorViewMut<'_, T, N> {
+            #[doc = $doc]
+            ///
+            /// # Panics
+            ///
+            /// Panics at compile time if `M > N`, or at runtime if `self.shape() != out.shape()`
+            /// or if `rhs.shape()` does not match `&out.shape()[N - M..]`.
+            #[inline]
+            #[track_caller]
+            pub fn $fn_name<const M: usize>(
+                &self,
+                rhs: TensorView<'_, T, M>,
+                out: TensorViewMut<'_, T, N>,
+            ) where
+                T: Copy + $trait<T, Output = T>,
+            {
+                self.view().$fn_name(rhs, out);
+            }
+        }
+
+        #[cfg(feature = "alloc")]
+        impl<T, const N: usize> Tensor<T, N> {
+            #[doc = $doc]
+            ///
+            /// # Panics
+            ///
+            /// Panics at compile time if `M > N`, or at runtime if `self.shape() != out.shape()`
+            /// or if `rhs.shape()` does not match `&out.shape()[N - M..]`.
+            #[inline]
+            #[track_caller]
+            pub fn $fn_name<const M: usize>(
+                &self,
+                rhs: TensorView<'_, T, M>,
+                out: TensorViewMut<'_, T, N>,
+            ) where
+                T: Copy + $trait<T, Output = T>,
+            {
+                self.view().$fn_name(rhs, out);
             }
         }
     };

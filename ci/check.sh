@@ -8,7 +8,7 @@ for std in "" "alloc" "std"; do
                 feats=$(printf "%s %s %s %s" "$std" "$gemm" "$mm" "$blas" | xargs)
                 echo "==> clippy --no-default-features --features \"$feats\""
                 cargo clippy --all-targets --no-default-features --features "$feats" -- -D warnings
-                cargo doc --no-deps --no-default-features --features "$feats"
+                RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features --features "$feats"
             done
         done
     done

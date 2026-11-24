@@ -133,7 +133,7 @@ fn bench_mat_vec_ops<T: BenchElem>(c: &mut Criterion, dtype: &str) {
 
     let mut group = c.benchmark_group(format!("sum_axis0_{dtype}"));
     for &(m, n) in &shapes {
-        group.throughput(Throughput::Elements((2 * m * n) as u64));
+        group.throughput(Throughput::Elements((m * n) as u64));
         let x = fill_mat::<T>(m, n);
         let mut y = fill_vec::<T>(n);
 
@@ -156,7 +156,7 @@ fn bench_mat_vec_ops<T: BenchElem>(c: &mut Criterion, dtype: &str) {
 
     let mut group = c.benchmark_group(format!("ger_{dtype}"));
     for &(m, n) in &shapes {
-        group.throughput(Throughput::Elements((m * n) as u64));
+        group.throughput(Throughput::Elements((2 * m * n) as u64));
         let x = fill_vec::<T>(m);
         let y = fill_vec::<T>(n);
         let mut a = fill_mat::<T>(m, n);

@@ -1,18 +1,22 @@
 //! BLAS-style Level-1, Level-2, and Level-3 dense linear algebra routines over
 //! [`VectorView`], [`VectorViewMut`], [`MatrixView`], and [`MatrixViewMut`].
 
-use crate::{
-    MatrixView, MatrixViewMut, Sum, TensorView, TensorViewMut, VectorView, VectorViewMut,
-    unchecked_shape_len,
-};
-
 use core::array;
 use core::iter::zip;
 use core::ops::{Add, AddAssign, Mul, MulAssign};
 use num_traits::{One, Zero};
 
+use crate::{
+    MatrixView, MatrixViewMut, Sum, TensorView, TensorViewMut, VectorView, VectorViewMut,
+    unchecked_shape_len,
+};
+
 mod gemm;
 pub use gemm::*;
+
+// ============================================================================
+// Core Traits & Types
+// ============================================================================
 
 /// Scalar ring-like element trait required by generic linear algebra kernels.
 pub trait Element:
@@ -35,25 +39,9 @@ pub enum MatrixOp {
     Trans,
 }
 
-#[inline]
-const fn op_shape(shape: [usize; 2], op: MatrixOp) -> [usize; 2] {
-    match op {
-        MatrixOp::NoTrans => shape,
-        MatrixOp::Trans => [shape[1], shape[0]],
-    }
-}
-
-#[inline(always)]
-#[allow(clippy::inline_always)]
-pub(crate) fn axpy_slice<T: Element>(alpha: T, x: &[T], y: &mut [T]) {
-    debug_assert_eq!(x.len(), y.len());
-    if alpha.is_zero() {
-        return;
-    }
-    for (yi, &xi) in zip(y, x) {
-        *yi += alpha * xi;
-    }
-}
+// ============================================================================
+// Level-1 Routines
+// ============================================================================
 
 /// Computes `y := alpha * x + y` (BLAS Level-1 `axpy`) with right-aligned
 /// broadcasting on `x`.
@@ -85,12 +73,6 @@ pub fn axpy<T: Element, const N: usize, const M: usize>(
         .for_each(|chunk| axpy_slice(alpha, x.as_slice(), chunk.into_mut_slice()));
 }
 
-#[inline(always)]
-#[allow(clippy::inline_always)]
-pub(crate) fn dot_slice<T: Element>(x: VectorView<'_, T>, y: VectorView<'_, T>) -> T {
-    x.zip_reduce(y, Sum, |&a, &b| a * b)
-}
-
 /// Computes the inner product `x^T y` (BLAS Level-1 `dot`) using 16
 /// independent accumulators to break loop-carried dependency chains and
 /// enable SIMD vectorization without floating-point reassociation flags.
@@ -105,6 +87,73 @@ pub fn dot<T: Element>(x: VectorView<'_, T>, y: VectorView<'_, T>) -> T {
     assert_eq!(x.len(), y.len(), "vector length mismatch");
     dot_slice(x, y)
 }
+
+/// Accumulates the sum of `x` along `axis` into `y`:
+/// `y[..., j, ...] := sum_i x[..., i, ...] + beta * y[..., j, ...]`.
+///
+/// # Panics
+///
+/// Panics at compile time if `M + 1 != N`, or at runtime if `axis >= N` or if
+/// `y.shape()` does not match `x.shape()` with `axis` removed.
+#[inline]
+#[track_caller]
+pub fn sum_axis<T: Element, const N: usize, const M: usize>(
+    x: TensorView<'_, T, N>,
+    axis: usize,
+    beta: T,
+    mut y: TensorViewMut<'_, T, M>,
+) {
+    const {
+        assert!(M + 1 == N, "output rank M must equal input rank N - 1");
+    }
+    assert!(axis < N, "axis {axis} out of bounds for rank {N}");
+
+    let x_shape = x.shape();
+    let expected_shape: [usize; M] =
+        array::from_fn(|i| if i < axis { x_shape[i] } else { x_shape[i + 1] });
+    assert_eq!(y.shape(), expected_shape, "output shape mismatch");
+
+    if axis == N - 1 && beta.is_zero() {
+        for (dst, row) in zip(y, x.chunks::<1>()) {
+            *dst = row.reduce(Sum);
+        }
+        return;
+    }
+
+    if beta.is_zero() {
+        y.fill(T::zero());
+    } else if beta != T::one() {
+        y *= beta;
+    }
+
+    if axis == N - 1 {
+        for (dst, row) in zip(y, x.chunks::<1>()) {
+            *dst += row.reduce(Sum);
+        }
+        return;
+    }
+
+    // SAFETY: `x.shape()` is a valid tensor shape (all dimensions non-zero and
+    // total product fits in `usize`), so any sub-slice product is non-zero and
+    // cannot overflow `usize`.
+    let outer = unsafe { unchecked_shape_len(&x.shape_raw()[..axis]).get() };
+    // SAFETY: Same invariant as above for the trailing sub-slice.
+    let inner = unsafe { unchecked_shape_len(&x.shape_raw()[axis + 1..]).get() };
+    let axis_len = x.shape()[axis];
+
+    let a3 = x.reshape([outer, axis_len, inner]);
+    let c2 = y.reshape([outer, inner]);
+
+    for (a_outer, mut c_outer) in zip(a3.chunks::<2>(), c2.chunks::<1>()) {
+        for row in a_outer.chunks::<1>() {
+            c_outer += row;
+        }
+    }
+}
+
+// ============================================================================
+// Level-2 Routines
+// ============================================================================
 
 /// Computes `y := alpha * op(a) * x + beta * y` (BLAS Level-2 `gemv`).
 ///
@@ -176,69 +225,6 @@ pub fn gemv<T: Element>(
     }
 }
 
-/// Accumulates the sum of `x` along `axis` into `y`:
-/// `y[..., j, ...] := sum_i x[..., i, ...] + beta * y[..., j, ...]`.
-///
-/// # Panics
-///
-/// Panics at compile time if `M + 1 != N`, or at runtime if `axis >= N` or if
-/// `y.shape()` does not match `x.shape()` with `axis` removed.
-#[inline]
-#[track_caller]
-pub fn sum_axis<T: Element, const N: usize, const M: usize>(
-    x: TensorView<'_, T, N>,
-    axis: usize,
-    beta: T,
-    mut y: TensorViewMut<'_, T, M>,
-) {
-    const {
-        assert!(M + 1 == N, "output rank M must equal input rank N - 1");
-    }
-    assert!(axis < N, "axis {axis} out of bounds for rank {N}");
-
-    let x_shape = x.shape();
-    let expected_shape: [usize; M] =
-        array::from_fn(|i| if i < axis { x_shape[i] } else { x_shape[i + 1] });
-    assert_eq!(y.shape(), expected_shape, "output shape mismatch");
-
-    if axis == N - 1 && beta.is_zero() {
-        for (dst, row) in zip(y, x.chunks::<1>()) {
-            *dst = row.reduce(Sum);
-        }
-        return;
-    }
-
-    if beta.is_zero() {
-        y.fill(T::zero());
-    } else if beta != T::one() {
-        y *= beta;
-    }
-
-    if axis == N - 1 {
-        for (dst, row) in zip(y, x.chunks::<1>()) {
-            *dst += row.reduce(Sum);
-        }
-        return;
-    }
-
-    // SAFETY: `x.shape()` is a valid tensor shape (all dimensions non-zero and
-    // total product fits in `usize`), so any sub-slice product is non-zero and
-    // cannot overflow `usize`.
-    let outer = unsafe { unchecked_shape_len(&x.shape_raw()[..axis]).get() };
-    // SAFETY: Same invariant as above for the trailing sub-slice.
-    let inner = unsafe { unchecked_shape_len(&x.shape_raw()[axis + 1..]).get() };
-    let axis_len = x.shape()[axis];
-
-    let a3 = x.reshape([outer, axis_len, inner]);
-    let c2 = y.reshape([outer, inner]);
-
-    for (a_outer, mut c_outer) in core::iter::zip(a3.chunks::<2>(), c2.chunks::<1>()) {
-        for row in a_outer.chunks::<1>() {
-            c_outer += row;
-        }
-    }
-}
-
 /// Computes the rank-1 outer product update `a := alpha * x * y^T + a` (BLAS
 /// Level-2 `ger`).
 ///
@@ -266,4 +252,34 @@ pub fn ger<T: Element>(
     for (&xi, a_row) in zip(x.as_slice(), a.chunks::<1>()) {
         axpy_slice(alpha * xi, y.as_slice(), a_row.into_mut_slice());
     }
+}
+
+// ============================================================================
+// Internal Helpers
+// ============================================================================
+
+#[inline]
+const fn op_shape(shape: [usize; 2], op: MatrixOp) -> [usize; 2] {
+    match op {
+        MatrixOp::NoTrans => shape,
+        MatrixOp::Trans => [shape[1], shape[0]],
+    }
+}
+
+#[inline(always)]
+#[allow(clippy::inline_always)]
+pub(crate) fn axpy_slice<T: Element>(alpha: T, x: &[T], y: &mut [T]) {
+    debug_assert_eq!(x.len(), y.len());
+    if alpha.is_zero() {
+        return;
+    }
+    for (yi, &xi) in zip(y, x) {
+        *yi += alpha * xi;
+    }
+}
+
+#[inline(always)]
+#[allow(clippy::inline_always)]
+pub(crate) fn dot_slice<T: Element>(x: VectorView<'_, T>, y: VectorView<'_, T>) -> T {
+    x.zip_reduce(y, Sum, |&a, &b| a * b)
 }

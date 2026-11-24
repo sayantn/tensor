@@ -5,6 +5,10 @@ use core::ptr::NonNull;
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 
+// ============================================================================
+// TensorView
+// ============================================================================
+
 /// An immutable, zero-copy view over a contiguous row-major tensor of rank `N`.
 ///
 /// `TensorView` implements [`Copy`] and [`Clone`] regardless of whether `T`
@@ -21,7 +25,7 @@ unsafe impl<T: Sync, const N: usize> Send for TensorView<'_, T, N> {}
 // SAFETY: `TensorView<'a, T, N>` provides only shared immutable access to `T`.
 unsafe impl<T: Sync, const N: usize> Sync for TensorView<'_, T, N> {}
 
-impl<'a, T, const N: usize> TensorView<'a, T, N> {
+impl<T, const N: usize> TensorView<'_, T, N> {
     /// Creates a [`TensorView`] directly from a `shape` and non-null base pointer.
     ///
     /// # Safety
@@ -50,6 +54,10 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     }
 }
 
+// ============================================================================
+// TensorViewMut
+// ============================================================================
+
 /// A mutable, zero-copy view over a contiguous row-major tensor of rank `N`.
 #[must_use]
 pub struct TensorViewMut<'a, T, const N: usize> {
@@ -63,7 +71,7 @@ unsafe impl<T: Send, const N: usize> Send for TensorViewMut<'_, T, N> {}
 // SAFETY: `TensorViewMut<'a, T, N>` acts identically to `&'a mut [T]`.
 unsafe impl<T: Sync, const N: usize> Sync for TensorViewMut<'_, T, N> {}
 
-impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
+impl<T, const N: usize> TensorViewMut<'_, T, N> {
     /// Creates a [`TensorViewMut`] directly from a `shape` and non-null base pointer.
     ///
     /// # Safety
@@ -91,6 +99,10 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         self.ptr
     }
 }
+
+// ============================================================================
+// Tensor
+// ============================================================================
 
 /// An owned, heap-allocated, row-major dense tensor of rank `N`.
 ///

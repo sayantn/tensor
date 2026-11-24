@@ -7,6 +7,10 @@ use num_traits::{One, Zero};
 #[cfg(feature = "std")]
 use num_traits::Float;
 
+// ============================================================================
+// Monoid Trait
+// ============================================================================
+
 /// An associative, commutative reduction operator with an identity element.
 ///
 /// Reductions over [`Monoid`] operators evaluate elements across 16
@@ -31,6 +35,10 @@ pub trait Monoid<T>: Copy {
     /// Combines an accumulated lane value `acc` with a new element `val`.
     fn combine(self, acc: T, val: T) -> T;
 }
+
+// ============================================================================
+// Monoid Operators
+// ============================================================================
 
 /// Additive reduction monoid (`0`, `+`).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -64,7 +72,7 @@ impl<T: Copy + One + Mul<Output = T>> Monoid<T> for Prod {
     }
 }
 
-/// Minimum reduction monoid (`+∞` / `T::max_value()`, `min`).
+/// Minimum reduction monoid (`+∞`, `min`).
 ///
 /// Uses IEEE-754 [`Float::min`] (`f32::min` / `f64::min`), which propagates
 /// non-`NaN` values when one operand is `NaN` and maps directly to hardware
@@ -86,7 +94,7 @@ impl<T: Float> Monoid<T> for Min {
     }
 }
 
-/// Maximum reduction monoid (`-∞` / `T::min_value()`, `max`).
+/// Maximum reduction monoid (`-∞`, `max`).
 ///
 /// Uses IEEE-754 [`Float::max`] (`f32::max` / `f64::max`), which propagates
 /// non-`NaN` values when one operand is `NaN` and maps directly to hardware

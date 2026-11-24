@@ -1,10 +1,9 @@
-use core::fmt::{Debug, Display, Formatter};
-use core::iter::FusedIterator;
+use core::fmt::{self, Debug, Display, Formatter};
+use core::iter::{FusedIterator, zip};
 use core::num::NonZeroUsize;
 use core::ops::{Index, IndexMut, RangeBounds};
 use core::ptr::NonNull;
-use core::slice::{Iter, IterMut};
-use core::{fmt, slice};
+use core::slice::{self, Iter, IterMut};
 
 use crate::{
     MatrixViewMut, Monoid, ScalarViewMut, TensorView, TensorViewMut, VectorViewMut, linear_offset,
@@ -14,7 +13,13 @@ use crate::{
 #[cfg(feature = "alloc")]
 use crate::Tensor;
 
+// ============================================================================
+// TensorViewMut
+// ============================================================================
+
 impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
+    // -- Construction & Conversion -------------------------------------------
+
     /// Wraps an existing mutable row-major slice in a [`TensorViewMut`].
     ///
     /// # Panics
@@ -30,6 +35,28 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         // and `data` is exclusively valid for reads and writes for lifetime `'a`.
         unsafe { Self::from_raw_parts(shape, NonNull::from_mut(data).cast()) }
     }
+
+    /// Consumes the view and returns the underlying mutable slice with
+    /// lifetime `'a`.
+    #[inline]
+    #[must_use]
+    pub const fn into_mut_slice(self) -> &'a mut [T] {
+        // SAFETY: Consuming `self` transfers exclusive `'a` access to `self.ptr`
+        // across `self.len()` initialized elements of type `T`.
+        unsafe { slice::from_raw_parts_mut(self.ptr().as_ptr(), self.len()) }
+    }
+
+    /// Clones the elements of this view into an owned [`Tensor<T, N>`].
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub fn to_tensor(&self) -> Tensor<T, N>
+    where
+        T: Clone,
+    {
+        self.view().to_tensor()
+    }
+
+    // -- Metadata & Raw Access -----------------------------------------------
 
     /// Returns the dimensions of the tensor view.
     #[inline]
@@ -79,15 +106,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         self.ptr().as_ptr()
     }
 
-    /// Consumes the view and returns the underlying mutable slice with
-    /// lifetime `'a`.
-    #[inline]
-    #[must_use]
-    pub const fn into_mut_slice(self) -> &'a mut [T] {
-        // SAFETY: Consuming `self` transfers exclusive `'a` access to `self.ptr`
-        // across `self.len()` initialized elements of type `T`.
-        unsafe { slice::from_raw_parts_mut(self.ptr().as_ptr(), self.len()) }
-    }
+    // -- Reborrowing ---------------------------------------------------------
 
     /// Reborrows this mutable view as an immutable [`TensorView`].
     #[inline]
@@ -114,6 +133,38 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         unsafe { TensorViewMut::from_raw_parts(self.shape_raw(), self.ptr()) }
     }
 
+    // -- Indexing & Iteration ------------------------------------------------
+
+    /// Returns a reference to the element at `index`, or `None` if any
+    /// coordinate is out of bounds.
+    #[inline]
+    #[must_use]
+    pub const fn get(&self, index: [usize; N]) -> Option<&T> {
+        let Some(off) = linear_offset_checked(&self.shape_raw(), &index) else {
+            return None;
+        };
+        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
+        // so `off < self.len()` and `ptr` stays within the exclusive span.
+        let ptr = unsafe { self.ptr().add(off) };
+        // SAFETY: `ptr` points to a valid, initialized, exclusively borrowed `T`.
+        Some(unsafe { ptr.as_ref() })
+    }
+
+    /// Returns a mutable reference to the element at `index`, or `None` if any
+    /// coordinate is out of bounds.
+    #[inline]
+    #[must_use]
+    pub const fn get_mut(&mut self, index: [usize; N]) -> Option<&mut T> {
+        let Some(off) = linear_offset_checked(&self.shape_raw(), &index) else {
+            return None;
+        };
+        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
+        // so `off < self.len()` and `ptr` stays within the exclusive span.
+        let mut ptr = unsafe { self.ptr().add(off) };
+        // SAFETY: `ptr` points to a valid, initialized, exclusively borrowed `T`.
+        Some(unsafe { ptr.as_mut() })
+    }
+
     /// Returns an iterator over immutable element references in row-major
     /// order.
     #[inline]
@@ -126,6 +177,8 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     pub fn iter_mut(&mut self) -> IterMut<'_, T> {
         self.as_mut_slice().iter_mut()
     }
+
+    // -- In-Place Mutation ---------------------------------------------------
 
     /// Fills every element in the view with clones of `value`.
     #[inline]
@@ -162,6 +215,8 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
             .chunks::<M>()
             .for_each(|chunk| chunk.into_mut_slice().copy_from_slice(src_slice));
     }
+
+    // -- Layout & Slicing ----------------------------------------------------
 
     /// Consumes and reinterprets the mutable view with a new rank `M` and
     /// `new_shape` without copying data.
@@ -204,7 +259,6 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         }
 
         let shape = self.shape_raw();
-
         let (start, len) = resolve_range(range, shape[0]);
         // SAFETY: `self.shape[1..]` is a subslice of `self.shape`, whose product fits in `usize`.
         let inner = unsafe { unchecked_shape_len(&shape[1..]) };
@@ -241,7 +295,6 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         }
 
         let shape = self.shape_raw();
-
         let Some((&axis0, rest)) = shape.split_first() else {
             unreachable!();
         };
@@ -302,45 +355,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         ChunksMut { inner, shape }
     }
 
-    /// Clones the elements of this view into an owned [`Tensor<T, N>`].
-    #[cfg(feature = "alloc")]
-    #[inline]
-    pub fn to_tensor(&self) -> Tensor<T, N>
-    where
-        T: Clone,
-    {
-        self.view().to_tensor()
-    }
-
-    /// Returns a reference to the element at `index`, or `None` if any
-    /// coordinate is out of bounds.
-    #[inline]
-    #[must_use]
-    pub const fn get(&self, index: [usize; N]) -> Option<&T> {
-        let Some(off) = linear_offset_checked(&self.shape_raw(), &index) else {
-            return None;
-        };
-        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
-        // so `off < self.len()` and `ptr` stays within the exclusive span.
-        let ptr = unsafe { self.ptr().add(off) };
-        // SAFETY: `ptr` points to a valid, initialized, exclusively borrowed `T`.
-        Some(unsafe { ptr.as_ref() })
-    }
-
-    /// Returns a mutable reference to the element at `index`, or `None` if any
-    /// coordinate is out of bounds.
-    #[inline]
-    #[must_use]
-    pub const fn get_mut(&mut self, index: [usize; N]) -> Option<&mut T> {
-        let Some(off) = linear_offset_checked(&self.shape_raw(), &index) else {
-            return None;
-        };
-        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
-        // so `off < self.len()` and `ptr` stays within the exclusive span.
-        let mut ptr = unsafe { self.ptr().add(off) };
-        // SAFETY: `ptr` points to a valid, initialized, exclusively borrowed `T`.
-        Some(unsafe { ptr.as_mut() })
-    }
+    // -- Reductions ----------------------------------------------------------
 
     /// Mutates each element with `f` in place while reducing the returned
     /// values using the [`Monoid`] `op` across 16 independent accumulators.
@@ -393,7 +408,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         let (bc, br) = rhs.as_slice().as_chunks::<LANES>();
 
         let mut acc = [op.identity(); LANES];
-        for (aa, ba) in core::iter::zip(ac, bc) {
+        for (aa, ba) in zip(ac, bc) {
             for l in 0..LANES {
                 acc[l] = op.combine(acc[l], f(&mut aa[l], &ba[l]));
             }
@@ -403,10 +418,87 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         for &lane in &acc[1..] {
             total = op.combine(total, lane);
         }
-        for (a, b) in core::iter::zip(ar, br) {
+        for (a, b) in zip(ar, br) {
             total = op.combine(total, f(a, b));
         }
         total
+    }
+}
+
+// ============================================================================
+// Rank-Specific Helpers
+// ============================================================================
+
+impl<'a, T> ScalarViewMut<'a, T> {
+    /// Creates a 0-dimensional [`ScalarViewMut`] borrowing a single mutable
+    /// reference.
+    #[inline]
+    pub const fn scalar(val: &'a mut T) -> Self {
+        // SAFETY: Shape `[]` has product 1 and `val` points to 1 exclusively borrowed `T` for `'a`.
+        unsafe { Self::from_raw_parts([], NonNull::from_mut(val)) }
+    }
+
+    /// Consumes the view and returns the underlying mutable scalar reference.
+    #[inline]
+    #[must_use]
+    pub const fn into_scalar(self) -> &'a mut T {
+        // SAFETY: A rank-0 `ScalarViewMut` has shape `[]` (`len == 1`), so consuming
+        // `self` transfers exclusive `'a` access to `self.ptr`.
+        unsafe { self.ptr().as_mut() }
+    }
+}
+
+impl<'a, T> VectorViewMut<'a, T> {
+    /// Creates a 1-dimensional [`VectorViewMut`] borrowing a mutable slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `val` is empty.
+    #[inline]
+    #[track_caller]
+    pub const fn vector(val: &'a mut [T]) -> Self {
+        Self::from_slice(val, [val.len()])
+    }
+}
+
+impl<T> MatrixViewMut<'_, T> {
+    /// Returns the number of rows (`shape()[0]`) in the mutable matrix view.
+    #[inline]
+    #[must_use]
+    pub const fn nrows(&self) -> usize {
+        self.shape_raw()[0].get()
+    }
+
+    /// Returns the number of columns (`shape()[1]`) in the mutable matrix view.
+    #[inline]
+    #[must_use]
+    pub const fn ncols(&self) -> usize {
+        self.shape_raw()[1].get()
+    }
+}
+
+// ============================================================================
+// Standard Trait Implementations
+// ============================================================================
+
+impl<'a, T, const N: usize> From<TensorViewMut<'a, T, N>> for TensorView<'a, T, N> {
+    #[inline]
+    fn from(value: TensorViewMut<'a, T, N>) -> Self {
+        value.into_view()
+    }
+}
+
+impl<T, const N: usize> AsRef<[T]> for TensorViewMut<'_, T, N> {
+    #[inline]
+    fn as_ref(&self) -> &[T] {
+        self.as_slice()
+    }
+}
+
+impl<T, const N: usize> AsMut<[T]> for TensorViewMut<'_, T, N> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut [T] {
+        self.as_mut_slice()
     }
 }
 
@@ -468,6 +560,16 @@ impl<'a, T, const N: usize> IntoIterator for &'a mut TensorViewMut<'_, T, N> {
     }
 }
 
+impl<T: Debug, const N: usize> Debug for TensorViewMut<'_, T, N> {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TensorViewMut")
+            .field("shape", &self.shape())
+            .field("data", &self.as_slice())
+            .finish()
+    }
+}
+
 impl<T: Display, const N: usize> Display for TensorViewMut<'_, T, N> {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -475,74 +577,33 @@ impl<T: Display, const N: usize> Display for TensorViewMut<'_, T, N> {
     }
 }
 
-impl<'a, T> ScalarViewMut<'a, T> {
-    /// Creates a 0-dimensional [`ScalarViewMut`] borrowing a single mutable
-    /// reference.
+impl<T: PartialEq, const N: usize> PartialEq<TensorViewMut<'_, T, N>> for TensorViewMut<'_, T, N> {
     #[inline]
-    pub const fn scalar(val: &'a mut T) -> Self {
-        // SAFETY: Shape `[]` has product 1 and `val` points to 1 exclusively borrowed `T` for `'a`.
-        unsafe { Self::from_raw_parts([], NonNull::from_mut(val)) }
-    }
-
-    /// Consumes the view and returns the underlying mutable scalar reference.
-    #[inline]
-    #[must_use]
-    pub const fn into_scalar(self) -> &'a mut T {
-        // SAFETY: A rank-0 `ScalarViewMut` has shape `[]` (`len == 1`), so consuming
-        // `self` transfers exclusive `'a` access to `self.ptr`.
-        unsafe { self.ptr().as_mut() }
+    fn eq(&self, other: &TensorViewMut<'_, T, N>) -> bool {
+        self.view() == other.view()
     }
 }
 
-impl<'a, T> VectorViewMut<'a, T> {
-    /// Creates a 1-dimensional [`VectorViewMut`] borrowing a mutable slice.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `val` is empty.
+impl<T: Eq, const N: usize> Eq for TensorViewMut<'_, T, N> {}
+
+impl<T: PartialEq, const N: usize> PartialEq<TensorViewMut<'_, T, N>> for TensorView<'_, T, N> {
     #[inline]
-    #[track_caller]
-    pub const fn vector(val: &'a mut [T]) -> Self {
-        Self::from_slice(val, [val.len()])
+    fn eq(&self, other: &TensorViewMut<'_, T, N>) -> bool {
+        self == &other.view()
     }
 }
 
-impl<T> MatrixViewMut<'_, T> {
-    /// Returns the number of rows (`shape()[0]`) in the mutable matrix view.
+#[cfg(feature = "alloc")]
+impl<T: PartialEq, const N: usize> PartialEq<TensorViewMut<'_, T, N>> for Tensor<T, N> {
     #[inline]
-    #[must_use]
-    pub const fn nrows(&self) -> usize {
-        self.shape_raw()[0].get()
-    }
-
-    /// Returns the number of columns (`shape()[1]`) in the mutable matrix view.
-    #[inline]
-    #[must_use]
-    pub const fn ncols(&self) -> usize {
-        self.shape_raw()[1].get()
+    fn eq(&self, other: &TensorViewMut<'_, T, N>) -> bool {
+        self.view() == other.view()
     }
 }
 
-impl<'a, T, const N: usize> From<TensorViewMut<'a, T, N>> for TensorView<'a, T, N> {
-    #[inline]
-    fn from(value: TensorViewMut<'a, T, N>) -> Self {
-        value.into_view()
-    }
-}
-
-impl<T, const N: usize> AsRef<[T]> for TensorViewMut<'_, T, N> {
-    #[inline]
-    fn as_ref(&self) -> &[T] {
-        self.as_slice()
-    }
-}
-
-impl<T, const N: usize> AsMut<[T]> for TensorViewMut<'_, T, N> {
-    #[inline]
-    fn as_mut(&mut self) -> &mut [T] {
-        self.as_mut_slice()
-    }
-}
+// ============================================================================
+// ChunksMut Iterator
+// ============================================================================
 
 #[derive(Debug)]
 enum ChunksInnerMut<'a, T> {
@@ -697,37 +758,3 @@ impl<T, const M: usize> ExactSizeIterator for ChunksMut<'_, T, M> {
 }
 
 impl<T, const M: usize> FusedIterator for ChunksMut<'_, T, M> {}
-
-impl<T: Debug, const N: usize> Debug for TensorViewMut<'_, T, N> {
-    #[inline]
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TensorViewMut")
-            .field("shape", &self.shape())
-            .field("data", &self.as_slice())
-            .finish()
-    }
-}
-
-impl<T: PartialEq, const N: usize> PartialEq<TensorViewMut<'_, T, N>> for TensorViewMut<'_, T, N> {
-    #[inline]
-    fn eq(&self, other: &TensorViewMut<'_, T, N>) -> bool {
-        self.view() == other.view()
-    }
-}
-
-impl<T: Eq, const N: usize> Eq for TensorViewMut<'_, T, N> {}
-
-impl<T: PartialEq, const N: usize> PartialEq<TensorViewMut<'_, T, N>> for TensorView<'_, T, N> {
-    #[inline]
-    fn eq(&self, other: &TensorViewMut<'_, T, N>) -> bool {
-        self == &other.view()
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl<T: PartialEq, const N: usize> PartialEq<TensorViewMut<'_, T, N>> for Tensor<T, N> {
-    #[inline]
-    fn eq(&self, other: &TensorViewMut<'_, T, N>) -> bool {
-        self.view() == other.view()
-    }
-}

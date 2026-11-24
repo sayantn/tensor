@@ -10,7 +10,13 @@ use crate::{
     validate_shape,
 };
 
+// ============================================================================
+// Tensor
+// ============================================================================
+
 impl<T, const N: usize> Tensor<T, N> {
+    // -- Construction & Destruction ------------------------------------------
+
     /// Constructs an owned [`Tensor`] from a flat row-major [`Vec`] and
     /// `shape`.
     ///
@@ -89,6 +95,8 @@ impl<T, const N: usize> Tensor<T, N> {
         self.into_data()
     }
 
+    // -- Metadata & Raw Access -----------------------------------------------
+
     /// Returns the dimensions of the tensor.
     #[inline]
     #[must_use]
@@ -131,6 +139,8 @@ impl<T, const N: usize> Tensor<T, N> {
         self.data_mut().as_mut_ptr()
     }
 
+    // -- Views ---------------------------------------------------------------
+
     /// Borrows the tensor as an immutable [`TensorView`].
     #[inline]
     pub const fn view(&self) -> TensorView<'_, T, N> {
@@ -151,6 +161,8 @@ impl<T, const N: usize> Tensor<T, N> {
             )
         }
     }
+
+    // -- Owned Layout Transforms ---------------------------------------------
 
     /// Consumes and reshapes the owned tensor to rank `M` and `new_shape`
     /// without reallocating.
@@ -179,22 +191,9 @@ impl<T, const N: usize> Tensor<T, N> {
     }
 }
 
-impl<T, const N: usize> IntoIterator for Tensor<T, N> {
-    type Item = T;
-    type IntoIter = vec::IntoIter<T>;
-
-    #[inline]
-    fn into_iter(self) -> Self::IntoIter {
-        self.into_vec().into_iter()
-    }
-}
-
-impl<T: Display, const N: usize> Display for Tensor<T, N> {
-    #[inline]
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.view().fmt(f)
-    }
-}
+// ============================================================================
+// Rank-Specific Helpers
+// ============================================================================
 
 impl<T> Scalar<T> {
     /// Creates an owned 0-dimensional [`Scalar`] tensor containing `val`.
@@ -225,6 +224,17 @@ impl<T> Matrix<T> {
     #[must_use]
     pub const fn ncols(&self) -> usize {
         self.shape_raw()[1].get()
+    }
+}
+
+// ============================================================================
+// Standard Trait Implementations
+// ============================================================================
+
+impl<T: Default> Default for Scalar<T> {
+    #[inline]
+    fn default() -> Self {
+        Scalar::scalar(T::default())
     }
 }
 
@@ -272,10 +282,20 @@ impl<T, const N: usize> AsMut<[T]> for Tensor<T, N> {
     }
 }
 
-impl<T: Default> Default for Scalar<T> {
+impl<T, const N: usize> IntoIterator for Tensor<T, N> {
+    type Item = T;
+    type IntoIter = vec::IntoIter<T>;
+
     #[inline]
-    fn default() -> Self {
-        Scalar::scalar(T::default())
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
+    }
+}
+
+impl<T: Display, const N: usize> Display for Tensor<T, N> {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.view().fmt(f)
     }
 }
 

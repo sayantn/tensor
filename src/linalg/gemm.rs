@@ -1,7 +1,11 @@
+use core::iter::zip;
+
 use super::{Element, MatrixOp, axpy_slice, dot_slice, op_shape};
 use crate::{MatrixView, MatrixViewMut};
 
-use core::iter::zip;
+// ============================================================================
+// GemmBackend Trait
+// ============================================================================
 
 /// Backend abstraction for general matrix-matrix multiplication (`GEMM`):
 /// `c := alpha * op(a) * op(b) + beta * c`.
@@ -22,28 +26,16 @@ pub trait GemmBackend<T> {
     );
 }
 
+// ============================================================================
+// Backend Types
+// ============================================================================
+
 /// Pure-Rust reference [`GemmBackend`].
 ///
 /// Works for any scalar type implementing [`Element`] in `#![no_std]`
 /// environments without external crates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Naive;
-
-/// [`GemmBackend`] backed by system CBLAS (`cblas_sgemm` / `cblas_dgemm`).
-#[cfg(feature = "backend-blas")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Blas;
-
-/// [`GemmBackend`] backed by the pure-Rust `matrixmultiply` crate (`f32` and `f64`).
-#[cfg(feature = "backend-matrixmultiply")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct MatrixMultiplyCrate;
-
-/// [`GemmBackend`] backed by the pure-Rust `gemm` crate (`f32`, `f64`, and
-/// optionally `half::f16`).
-#[cfg(feature = "backend-gemm")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct GemmCrate;
 
 /// Adaptive [`GemmBackend`] that dispatches to `Small` when `m * n * k <= cutoff`
 /// and to `Large` otherwise.
@@ -83,27 +75,108 @@ impl<Small: Default, Large: Default> Cutoff<Small, Large> {
     }
 }
 
-#[inline]
-#[track_caller]
-fn check_shapes<T>(
-    (a, ta): (MatrixView<'_, T>, MatrixOp),
-    (b, tb): (MatrixView<'_, T>, MatrixOp),
-    c: &MatrixViewMut<'_, T>,
-) -> [usize; 3] {
-    let [m, k] = op_shape(a.shape(), ta);
-    let [kb, n] = op_shape(b.shape(), tb);
-    assert_eq!(k, kb, "inner dimension mismatch");
-    assert_eq!([m, n], c.shape(), "output shape mismatch");
-    [m, n, k]
+/// [`GemmBackend`] backed by system CBLAS (`cblas_sgemm` / `cblas_dgemm`).
+#[cfg(feature = "backend-blas")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Blas;
+
+/// [`GemmBackend`] backed by the pure-Rust `matrixmultiply` crate (`f32` and `f64`).
+#[cfg(feature = "backend-matrixmultiply")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MatrixMultiplyCrate;
+
+/// [`GemmBackend`] backed by the pure-Rust `gemm` crate (`f32`, `f64`, and
+/// optionally `half::f16`).
+#[cfg(feature = "backend-gemm")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GemmCrate;
+
+// ============================================================================
+// Backend Implementations
+// ============================================================================
+
+impl<T: Element> GemmBackend<T> for Naive {
+    #[inline]
+    #[track_caller]
+    fn gemm(
+        &self,
+        alpha: T,
+        (a, ta): (MatrixView<'_, T>, MatrixOp),
+        (b, tb): (MatrixView<'_, T>, MatrixOp),
+        beta: T,
+        mut c: MatrixViewMut<'_, T>,
+    ) {
+        let _ = check_shapes((a, ta), (b, tb), &c);
+
+        if beta.is_zero() {
+            c.fill(T::zero());
+        } else if beta != T::one() {
+            c *= beta;
+        }
+
+        if alpha.is_zero() {
+            return;
+        }
+
+        match (ta, tb) {
+            (MatrixOp::NoTrans, MatrixOp::Trans) => {
+                for (c_row, a_row) in zip(c.chunks::<1>(), a.chunks::<1>()) {
+                    for (cij, b_row) in zip(c_row.into_mut_slice(), b.chunks::<1>()) {
+                        *cij += alpha * dot_slice(a_row, b_row);
+                    }
+                }
+            }
+            (MatrixOp::NoTrans, MatrixOp::NoTrans) => {
+                for (c_row, a_row) in zip(c.chunks::<1>(), a.chunks::<1>()) {
+                    let c_row = c_row.into_mut_slice();
+                    for (&a_ip, b_row) in zip(a_row.as_slice(), b.chunks::<1>()) {
+                        axpy_slice(alpha * a_ip, b_row.as_slice(), c_row);
+                    }
+                }
+            }
+            (MatrixOp::Trans, MatrixOp::NoTrans) => {
+                for (a_row, b_row) in zip(a.chunks::<1>(), b.chunks::<1>()) {
+                    let b_row = b_row.as_slice();
+                    for (&a_pi, c_row) in zip(a_row.as_slice(), c.view_mut().chunks::<1>()) {
+                        axpy_slice(alpha * a_pi, b_row, c_row.into_mut_slice());
+                    }
+                }
+            }
+            (MatrixOp::Trans, MatrixOp::Trans) => {
+                // `a` is `[k, m]` and `b` is `[n, k]`: dot column `i` of `a` with row `j` of `b`.
+                for (i, c_row) in c.chunks::<1>().enumerate() {
+                    for (cij, b_row) in zip(c_row.into_mut_slice(), b.chunks::<1>()) {
+                        let mut sum = T::zero();
+                        for (a_row, &b_jp) in zip(a.chunks::<1>(), b_row.as_slice()) {
+                            // `a_row` has length `m` and `i < m` (from `c.chunks::<1>()`).
+                            sum += a_row.as_slice()[i] * b_jp;
+                        }
+                        *cij += alpha * sum;
+                    }
+                }
+            }
+        }
+    }
 }
 
-/// `(row stride, col stride)` of the logical `op(x)` for a row-major `x` with `ld` columns.
-#[inline]
-#[allow(unused)]
-const fn strides(ld: usize, op: MatrixOp) -> (usize, usize) {
-    match op {
-        MatrixOp::NoTrans => (ld, 1),
-        MatrixOp::Trans => (1, ld),
+impl<T, Small: GemmBackend<T>, Large: GemmBackend<T>> GemmBackend<T> for Cutoff<Small, Large> {
+    #[inline]
+    #[track_caller]
+    fn gemm(
+        &self,
+        alpha: T,
+        a: (MatrixView<'_, T>, MatrixOp),
+        b: (MatrixView<'_, T>, MatrixOp),
+        beta: T,
+        c: MatrixViewMut<'_, T>,
+    ) {
+        let [m, n, k] = check_shapes(a, b, &c);
+
+        if m.saturating_mul(n).saturating_mul(k) <= self.cutoff {
+            self.small.gemm(alpha, a, b, beta, c);
+        } else {
+            self.large.gemm(alpha, a, b, beta, c);
+        }
     }
 }
 
@@ -125,7 +198,7 @@ macro_rules! impl_for_blas {
 
                 assert!(
                     m | n | k <= core::ffi::c_int::MAX as usize,
-                    "Matrix dimension too large for BLAS"
+                    "matrix dimension too large for BLAS"
                 );
 
                 let ta = match ta {
@@ -275,87 +348,30 @@ impl_for_gemm_crate!(
     half::f16
 );
 
-impl<T, Small: GemmBackend<T>, Large: GemmBackend<T>> GemmBackend<T> for Cutoff<Small, Large> {
-    #[inline]
-    #[track_caller]
-    fn gemm(
-        &self,
-        alpha: T,
-        a: (MatrixView<'_, T>, MatrixOp),
-        b: (MatrixView<'_, T>, MatrixOp),
-        beta: T,
-        c: MatrixViewMut<'_, T>,
-    ) {
-        let [m, n, k] = check_shapes(a, b, &c);
+// ============================================================================
+// Internal Helpers
+// ============================================================================
 
-        if m.saturating_mul(n).saturating_mul(k) <= self.cutoff {
-            self.small.gemm(alpha, a, b, beta, c);
-        } else {
-            self.large.gemm(alpha, a, b, beta, c);
-        }
-    }
+#[inline]
+#[track_caller]
+fn check_shapes<T>(
+    (a, ta): (MatrixView<'_, T>, MatrixOp),
+    (b, tb): (MatrixView<'_, T>, MatrixOp),
+    c: &MatrixViewMut<'_, T>,
+) -> [usize; 3] {
+    let [m, k] = op_shape(a.shape(), ta);
+    let [kb, n] = op_shape(b.shape(), tb);
+    assert_eq!(k, kb, "inner dimension mismatch");
+    assert_eq!([m, n], c.shape(), "output shape mismatch");
+    [m, n, k]
 }
 
-impl<T: Element> GemmBackend<T> for Naive {
-    #[inline]
-    #[track_caller]
-    fn gemm(
-        &self,
-        alpha: T,
-        (a, ta): (MatrixView<'_, T>, MatrixOp),
-        (b, tb): (MatrixView<'_, T>, MatrixOp),
-        beta: T,
-        mut c: MatrixViewMut<'_, T>,
-    ) {
-        let _ = check_shapes((a, ta), (b, tb), &c);
-
-        if beta.is_zero() {
-            c.fill(T::zero());
-        } else if beta != T::one() {
-            c *= beta;
-        }
-
-        if alpha.is_zero() {
-            return;
-        }
-
-        match (ta, tb) {
-            (MatrixOp::NoTrans, MatrixOp::Trans) => {
-                for (c_row, a_row) in zip(c.chunks::<1>(), a.chunks::<1>()) {
-                    for (cij, b_row) in zip(c_row.into_mut_slice(), b.chunks::<1>()) {
-                        *cij += alpha * dot_slice(a_row, b_row);
-                    }
-                }
-            }
-            (MatrixOp::NoTrans, MatrixOp::NoTrans) => {
-                for (c_row, a_row) in zip(c.chunks::<1>(), a.chunks::<1>()) {
-                    let c_row = c_row.into_mut_slice();
-                    for (&a_ip, b_row) in zip(a_row.as_slice(), b.chunks::<1>()) {
-                        axpy_slice(alpha * a_ip, b_row.as_slice(), c_row);
-                    }
-                }
-            }
-            (MatrixOp::Trans, MatrixOp::NoTrans) => {
-                for (a_row, b_row) in zip(a.chunks::<1>(), b.chunks::<1>()) {
-                    let b_row = b_row.as_slice();
-                    for (&a_pi, c_row) in zip(a_row.as_slice(), c.view_mut().chunks::<1>()) {
-                        axpy_slice(alpha * a_pi, b_row, c_row.into_mut_slice());
-                    }
-                }
-            }
-            (MatrixOp::Trans, MatrixOp::Trans) => {
-                // `a` is `[k, m]` and `b` is `[n, k]`: dot column `i` of `a` with row `j` of `b`.
-                for (i, c_row) in c.chunks::<1>().enumerate() {
-                    for (cij, b_row) in zip(c_row.into_mut_slice(), b.chunks::<1>()) {
-                        let mut sum = T::zero();
-                        for (a_row, &b_jp) in zip(a.chunks::<1>(), b_row.as_slice()) {
-                            // `a_row` has length `m` and `i < m` (from `c.chunks::<1>()`).
-                            sum += a_row.as_slice()[i] * b_jp;
-                        }
-                        *cij += alpha * sum;
-                    }
-                }
-            }
-        }
+/// `(row stride, col stride)` of the logical `op(x)` for a row-major `x` with `ld` columns.
+#[inline]
+#[allow(unused)]
+const fn strides(ld: usize, op: MatrixOp) -> (usize, usize) {
+    match op {
+        MatrixOp::NoTrans => (ld, 1),
+        MatrixOp::Trans => (1, ld),
     }
 }

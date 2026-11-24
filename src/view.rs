@@ -1,10 +1,9 @@
-use core::fmt::{Debug, Display, Formatter};
+use core::fmt::{self, Debug, Display, Formatter};
 use core::iter::{FusedIterator, zip};
 use core::num::NonZeroUsize;
 use core::ops::{Index, RangeBounds};
 use core::ptr::NonNull;
-use core::slice::Iter;
-use core::{fmt, slice};
+use core::slice::{self, Iter};
 
 use crate::{
     MatrixView, Monoid, ScalarView, TensorView, TensorViewMut, VectorView, fmt_nd, linear_offset,
@@ -14,16 +13,13 @@ use crate::{
 #[cfg(feature = "alloc")]
 use crate::Tensor;
 
-impl<T, const N: usize> Clone for TensorView<'_, T, N> {
-    #[inline]
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T, const N: usize> Copy for TensorView<'_, T, N> {}
+// ============================================================================
+// TensorView
+// ============================================================================
 
 impl<'a, T, const N: usize> TensorView<'a, T, N> {
+    // -- Construction & Conversion -------------------------------------------
+
     /// Wraps an existing row-major slice in an immutable [`TensorView`].
     ///
     /// # Panics
@@ -39,6 +35,24 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
         // and `data` is valid for reads for lifetime `'a`.
         unsafe { Self::from_raw_parts(shape, NonNull::from_ref(data).cast()) }
     }
+
+    /// Clones the elements of this view into an owned [`Tensor<T, N>`].
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub fn to_tensor(self) -> Tensor<T, N>
+    where
+        T: Clone,
+    {
+        // SAFETY: `self.shape` is valid and the cloned boxed slice has length `self.len()`.
+        unsafe {
+            Tensor::from_raw_parts(
+                self.shape_raw(),
+                self.as_slice().to_vec().into_boxed_slice(),
+            )
+        }
+    }
+
+    // -- Metadata & Raw Access -----------------------------------------------
 
     /// Returns the dimensions of the tensor view.
     #[inline]
@@ -72,11 +86,30 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
         self.ptr().as_ptr()
     }
 
+    // -- Indexing & Iteration ------------------------------------------------
+
+    /// Returns a reference to the element at `index`, or `None` if any
+    /// coordinate is out of bounds.
+    #[inline]
+    #[must_use]
+    pub const fn get(self, index: [usize; N]) -> Option<&'a T> {
+        let Some(off) = linear_offset_checked(&self.shape_raw(), &index) else {
+            return None;
+        };
+        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
+        // so `off < self.len()` and `ptr` stays within the valid read span.
+        let ptr = unsafe { self.ptr().add(off) };
+        // SAFETY: `ptr` points to a valid, initialized `T` for lifetime `'a`.
+        Some(unsafe { ptr.as_ref() })
+    }
+
     /// Returns an iterator over all elements in row-major order.
     #[inline]
     pub fn iter(&self) -> Iter<'a, T> {
         self.as_slice().iter()
     }
+
+    // -- Layout & Slicing ----------------------------------------------------
 
     /// Reinterprets the view with a new rank `M` and `new_shape` without
     /// copying data.
@@ -118,7 +151,6 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
         }
 
         let shape = self.shape_raw();
-
         let (start, len) = resolve_range(range, shape[0]);
         // SAFETY: `self.shape[1..]` is a subslice of `self.shape`, whose product fits in `usize`.
         let inner = unsafe { unchecked_shape_len(&shape[1..]) };
@@ -154,7 +186,6 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
         }
 
         let shape = self.shape_raw();
-
         let Some((&axis0, rest)) = shape.split_first() else {
             unreachable!();
         };
@@ -215,36 +246,7 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
         Chunks { inner, shape }
     }
 
-    /// Clones the elements of this view into an owned [`Tensor<T, N>`].
-    #[cfg(feature = "alloc")]
-    #[inline]
-    pub fn to_tensor(self) -> Tensor<T, N>
-    where
-        T: Clone,
-    {
-        // SAFETY: `self.shape` is valid and the cloned boxed slice has length `self.len()`.
-        unsafe {
-            Tensor::from_raw_parts(
-                self.shape_raw(),
-                self.as_slice().to_vec().into_boxed_slice(),
-            )
-        }
-    }
-
-    /// Returns a reference to the element at `index`, or `None` if any
-    /// coordinate is out of bounds.
-    #[inline]
-    #[must_use]
-    pub const fn get(self, index: [usize; N]) -> Option<&'a T> {
-        let Some(off) = linear_offset_checked(&self.shape_raw(), &index) else {
-            return None;
-        };
-        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
-        // so `off < self.len()` and `ptr` stays within the valid read span.
-        let ptr = unsafe { self.ptr().add(off) };
-        // SAFETY: `ptr` points to a valid, initialized `T` for lifetime `'a`.
-        Some(unsafe { ptr.as_ref() })
-    }
+    // -- Reductions ----------------------------------------------------------
 
     /// Maps each element with `f` and reduces the mapped values using the
     /// associative, commutative [`Monoid`] `op` across 16 independent
@@ -323,47 +325,9 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     }
 }
 
-impl<T, const N: usize> Index<[usize; N]> for TensorView<'_, T, N> {
-    type Output = T;
-
-    #[inline]
-    #[track_caller]
-    fn index(&self, index: [usize; N]) -> &Self::Output {
-        let off = linear_offset(&self.shape_raw(), &index);
-        // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`,
-        // so `off < self.len()` and `ptr` stays within the valid read span.
-        let ptr = unsafe { self.ptr().add(off) };
-        // SAFETY: `ptr` points to a valid, initialized `T` for lifetime `'a`.
-        unsafe { ptr.as_ref() }
-    }
-}
-
-impl<'a, T, const N: usize> IntoIterator for TensorView<'a, T, N> {
-    type Item = &'a T;
-    type IntoIter = Iter<'a, T>;
-
-    #[inline]
-    fn into_iter(self) -> Self::IntoIter {
-        self.as_slice().iter()
-    }
-}
-
-impl<'a, T, const N: usize> IntoIterator for &TensorView<'a, T, N> {
-    type Item = &'a T;
-    type IntoIter = Iter<'a, T>;
-
-    #[inline]
-    fn into_iter(self) -> Self::IntoIter {
-        self.as_slice().iter()
-    }
-}
-
-impl<T: Display, const N: usize> Display for TensorView<'_, T, N> {
-    #[inline]
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        fmt_nd(f, self.as_slice(), &self.shape_raw(), 0)
-    }
-}
+// ============================================================================
+// Rank-Specific Helpers
+// ============================================================================
 
 impl<'a, T> ScalarView<'a, T> {
     /// Creates a 0-dimensional [`ScalarView`] borrowing a single reference.
@@ -412,12 +376,105 @@ impl<T> MatrixView<'_, T> {
     }
 }
 
+// ============================================================================
+// Standard Trait Implementations
+// ============================================================================
+
+impl<T, const N: usize> Clone for TensorView<'_, T, N> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T, const N: usize> Copy for TensorView<'_, T, N> {}
+
 impl<T, const N: usize> AsRef<[T]> for TensorView<'_, T, N> {
     #[inline]
     fn as_ref(&self) -> &[T] {
         self.as_slice()
     }
 }
+
+impl<T, const N: usize> Index<[usize; N]> for TensorView<'_, T, N> {
+    type Output = T;
+
+    #[inline]
+    #[track_caller]
+    fn index(&self, index: [usize; N]) -> &Self::Output {
+        let off = linear_offset(&self.shape_raw(), &index);
+        // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`,
+        // so `off < self.len()` and `ptr` stays within the valid read span.
+        let ptr = unsafe { self.ptr().add(off) };
+        // SAFETY: `ptr` points to a valid, initialized `T` for lifetime `'a`.
+        unsafe { ptr.as_ref() }
+    }
+}
+
+impl<'a, T, const N: usize> IntoIterator for TensorView<'a, T, N> {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl<'a, T, const N: usize> IntoIterator for &TensorView<'a, T, N> {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl<T: Debug, const N: usize> Debug for TensorView<'_, T, N> {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TensorView")
+            .field("shape", &self.shape())
+            .field("data", &self.as_slice())
+            .finish()
+    }
+}
+
+impl<T: Display, const N: usize> Display for TensorView<'_, T, N> {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        fmt_nd(f, self.as_slice(), &self.shape_raw(), 0)
+    }
+}
+
+impl<T: PartialEq, const N: usize> PartialEq<TensorView<'_, T, N>> for TensorView<'_, T, N> {
+    #[inline]
+    fn eq(&self, other: &TensorView<'_, T, N>) -> bool {
+        self.shape_raw() == other.shape_raw() && self.as_slice() == other.as_slice()
+    }
+}
+
+impl<T: Eq, const N: usize> Eq for TensorView<'_, T, N> {}
+
+impl<T: PartialEq, const N: usize> PartialEq<TensorView<'_, T, N>> for TensorViewMut<'_, T, N> {
+    #[inline]
+    fn eq(&self, other: &TensorView<'_, T, N>) -> bool {
+        &self.view() == other
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T: PartialEq, const N: usize> PartialEq<TensorView<'_, T, N>> for Tensor<T, N> {
+    #[inline]
+    fn eq(&self, other: &TensorView<'_, T, N>) -> bool {
+        &self.view() == other
+    }
+}
+
+// ============================================================================
+// Chunks Iterator
+// ============================================================================
 
 #[derive(Debug, Clone)]
 enum ChunksInner<'a, T> {
@@ -572,37 +629,3 @@ impl<T, const M: usize> ExactSizeIterator for Chunks<'_, T, M> {
 }
 
 impl<T, const M: usize> FusedIterator for Chunks<'_, T, M> {}
-
-impl<T: Debug, const N: usize> Debug for TensorView<'_, T, N> {
-    #[inline]
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TensorView")
-            .field("shape", &self.shape())
-            .field("data", &self.as_slice())
-            .finish()
-    }
-}
-
-impl<T: PartialEq, const N: usize> PartialEq<TensorView<'_, T, N>> for TensorView<'_, T, N> {
-    #[inline]
-    fn eq(&self, other: &TensorView<'_, T, N>) -> bool {
-        self.shape_raw() == other.shape_raw() && self.as_slice() == other.as_slice()
-    }
-}
-
-impl<T: Eq, const N: usize> Eq for TensorView<'_, T, N> {}
-
-impl<T: PartialEq, const N: usize> PartialEq<TensorView<'_, T, N>> for TensorViewMut<'_, T, N> {
-    #[inline]
-    fn eq(&self, other: &TensorView<'_, T, N>) -> bool {
-        &self.view() == other
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl<T: PartialEq, const N: usize> PartialEq<TensorView<'_, T, N>> for Tensor<T, N> {
-    #[inline]
-    fn eq(&self, other: &TensorView<'_, T, N>) -> bool {
-        &self.view() == other
-    }
-}

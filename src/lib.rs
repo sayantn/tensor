@@ -22,7 +22,6 @@
 #![no_std]
 #![warn(
     missing_docs,
-    // implicit_provenance_casts,
     missing_debug_implementations,
     unreachable_pub,
     clippy::pedantic,
@@ -41,7 +40,7 @@
     clippy::alloc_instead_of_core,
     clippy::std_instead_of_alloc,
     clippy::unnecessary_safety_comment,
-    clippy::unnecessary_safety_doc,
+    clippy::unnecessary_safety_doc
 )]
 #![allow(
     clippy::len_without_is_empty,
@@ -58,26 +57,174 @@ use core::num::NonZeroUsize;
 use core::ops::{AddAssign, Bound, DivAssign, MulAssign, RangeBounds, SubAssign};
 
 mod inner;
-pub use inner::*;
-
+mod reduce;
 #[cfg(feature = "alloc")]
 mod tensor;
 mod view;
 mod view_mut;
 
-#[cfg(feature = "alloc")]
-pub use tensor::*;
+pub mod linalg;
+
+pub use inner::*;
+pub use reduce::*;
 pub use view::*;
 pub use view_mut::*;
 
-pub mod linalg;
+// ============================================================================
+// Rank Aliases
+// ============================================================================
 
-mod reduce;
-pub use reduce::*;
+#[cfg(feature = "alloc")]
+/// Owned 0-dimensional scalar tensor.
+pub type Scalar<T> = Tensor<T, 0>;
+/// Immutable 0-dimensional scalar view.
+pub type ScalarView<'a, T> = TensorView<'a, T, 0>;
+/// Mutable 0-dimensional scalar view.
+pub type ScalarViewMut<'a, T> = TensorViewMut<'a, T, 0>;
+
+#[cfg(feature = "alloc")]
+/// Owned 1-dimensional vector tensor.
+pub type Vector<T> = Tensor<T, 1>;
+/// Immutable 1-dimensional vector view.
+pub type VectorView<'a, T> = TensorView<'a, T, 1>;
+/// Mutable 1-dimensional vector view.
+pub type VectorViewMut<'a, T> = TensorViewMut<'a, T, 1>;
+
+#[cfg(feature = "alloc")]
+/// Owned 2-dimensional matrix tensor.
+pub type Matrix<T> = Tensor<T, 2>;
+/// Immutable 2-dimensional matrix view.
+pub type MatrixView<'a, T> = TensorView<'a, T, 2>;
+/// Mutable 2-dimensional matrix view.
+pub type MatrixViewMut<'a, T> = TensorViewMut<'a, T, 2>;
+
+// ============================================================================
+// Arithmetic Operators
+// ============================================================================
+
+macro_rules! impl_assign_ops {
+    ($trait:ident, $method:ident, $op:tt) => {
+        impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<TensorView<'_, T, M>>
+            for TensorViewMut<'_, T, N>
+        {
+            #[inline]
+            #[track_caller]
+            fn $method(&mut self, rhs: TensorView<'_, T, M>) {
+                const {
+                    assert!(
+                        M <= N,
+                        "cannot broadcast higher-rank tensor into lower-rank tensor"
+                    );
+                }
+                assert_eq!(self.shape()[N - M..], rhs.shape(), "broadcast shape mismatch");
+
+                self.view_mut().chunks::<M>().for_each(|chunk| {
+                    for (a, &b) in zip(chunk.into_mut_slice(), rhs.as_slice()) {
+                        *a $op b;
+                    }
+                })
+            }
+        }
+
+        impl<T: Copy + $trait<T>, const N: usize> $trait<T> for TensorViewMut<'_, T, N> {
+            #[inline]
+            fn $method(&mut self, rhs: T) {
+                self.$method(ScalarView::scalar(&rhs))
+            }
+        }
+    };
+}
+
+impl_assign_ops!(AddAssign, add_assign, +=);
+impl_assign_ops!(SubAssign, sub_assign, -=);
+impl_assign_ops!(MulAssign, mul_assign, *=);
+impl_assign_ops!(DivAssign, div_assign, /=);
+
+macro_rules! impl_owned_binary_ops {
+    ($trait:ident, $method:ident, $assign_trait:ident, $assign_method:ident) => {
+        #[cfg(feature = "alloc")]
+        // Tensor<T, N> + RHS (reuses `self` buffer in place; supports broadcasting M <= N)
+        impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
+            core::ops::$trait<TensorView<'_, T, M>> for Tensor<T, N>
+        {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            #[track_caller]
+            fn $method(mut self, rhs: TensorView<'_, T, M>) -> Self::Output {
+                self.view_mut().$assign_method(rhs);
+                self
+            }
+        }
+
+        #[cfg(feature = "alloc")]
+        impl<T: Copy + $assign_trait<T>, const N: usize> core::ops::$trait<T> for Tensor<T, N> {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            fn $method(mut self, rhs: T) -> Self::Output {
+                self.view_mut().$assign_method(rhs);
+                self
+            }
+        }
+
+        #[cfg(feature = "alloc")]
+        // Borrowed LHS (rank M <= N) + owned Tensor<T, N> (reuses `rhs` buffer in place!)
+        impl<T: Copy + core::ops::$trait<T, Output = T>, const N: usize, const M: usize>
+            core::ops::$trait<Tensor<T, N>> for TensorView<'_, T, M>
+        {
+            type Output = Tensor<T, N>;
+
+            #[inline]
+            #[track_caller]
+            fn $method(self, mut rhs: Tensor<T, N>) -> Self::Output {
+                const {
+                    assert!(
+                        M <= N,
+                        "cannot broadcast higher-rank tensor into lower-rank tensor"
+                    );
+                }
+                assert_eq!(
+                    self.shape(),
+                    rhs.shape()[N - M..],
+                    "broadcast shape mismatch"
+                );
+
+                let lhs_slice = self.as_slice();
+                rhs.view_mut().chunks::<M>().for_each(|chunk| {
+                    for (&a, b) in zip(lhs_slice, chunk.into_mut_slice()) {
+                        *b = a.$method(*b);
+                    }
+                });
+                rhs
+            }
+        }
+    };
+}
+
+impl_owned_binary_ops!(Add, add, AddAssign, add_assign);
+impl_owned_binary_ops!(Sub, sub, SubAssign, sub_assign);
+impl_owned_binary_ops!(Mul, mul, MulAssign, mul_assign);
+impl_owned_binary_ops!(Div, div, DivAssign, div_assign);
+
+#[cfg(feature = "alloc")]
+impl<T: Copy + core::ops::Neg<Output = T>, const N: usize> core::ops::Neg for Tensor<T, N> {
+    type Output = Tensor<T, N>;
+
+    #[inline]
+    fn neg(mut self) -> Self::Output {
+        for x in self.as_mut_slice() {
+            *x = -*x;
+        }
+        self
+    }
+}
 
 // ============================================================================
 // Internal Helpers
 // ============================================================================
+
+// -- Shape & Indexing --------------------------------------------------------
 
 #[inline]
 const fn unpack_shape<const N: usize>(shape: [NonZeroUsize; N]) -> [usize; N] {
@@ -187,126 +334,7 @@ fn resolve_range<R: RangeBounds<usize>>(range: R, axis_len: NonZeroUsize) -> (us
     (start, len)
 }
 
-macro_rules! impl_assign_ops {
-    ($trait:ident, $method:ident,$op:tt) => {
-        impl<T: Copy + $trait<T>, const N: usize, const M: usize>$trait<TensorView<'_, T, M>>
-            for TensorViewMut<'_, T, N>
-        {
-            #[inline]
-            #[track_caller]
-            fn $method(&mut self, rhs: TensorView<'_, T, M>) {
-                const {
-                    assert!(
-                        M <= N,
-                        "cannot broadcast higher-rank tensor into lower-rank tensor"
-                    );
-                }
-                assert_eq!(self.shape()[N - M..], rhs.shape(), "broadcast shape mismatch");
-
-                self.view_mut().chunks::<M>().for_each(|chunk| {
-                    for (a, &b) in zip(chunk.into_mut_slice(), rhs.as_slice()) {
-                        *a $op b;
-                    }
-                })
-            }
-        }
-
-        impl<T: Copy + $trait<T>, const N: usize>$trait<T> for TensorViewMut<'_, T, N> {
-            #[inline]
-            fn $method(&mut self, rhs: T) {
-                self.$method(ScalarView::scalar(&rhs))
-            }
-        }
-    };
-}
-
-impl_assign_ops!(AddAssign, add_assign, +=);
-impl_assign_ops!(SubAssign, sub_assign, -=);
-impl_assign_ops!(MulAssign, mul_assign, *=);
-impl_assign_ops!(DivAssign, div_assign, /=);
-
-macro_rules! impl_owned_binary_ops {
-    ($trait:ident,$method:ident, $assign_trait:ident,$assign_method:ident) => {
-        #[cfg(feature = "alloc")]
-        // Tensor<T, N> + RHS (reuses `self` buffer in place; supports broadcasting M <= N)
-        impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
-            core::ops::$trait<TensorView<'_, T, M>> for Tensor<T, N>
-        {
-            type Output = Tensor<T, N>;
-
-            #[inline]
-            #[track_caller]
-            fn $method(mut self, rhs: TensorView<'_, T, M>) -> Self::Output {
-                self.view_mut().$assign_method(rhs);
-                self
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $assign_trait<T>, const N: usize> core::ops::$trait<T> for Tensor<T, N> {
-            type Output = Tensor<T, N>;
-
-            #[inline]
-            fn $method(mut self, rhs: T) -> Self::Output {
-                self.view_mut().$assign_method(rhs);
-                self
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        // Borrowed LHS (rank M <= N) + owned Tensor<T, N> (reuses `rhs` buffer in place!)
-        impl<T: Copy + core::ops::$trait<T, Output = T>, const N: usize, const M: usize>
-            core::ops::$trait<Tensor<T, N>> for TensorView<'_, T, M>
-        {
-            type Output = Tensor<T, N>;
-
-            #[inline]
-            #[track_caller]
-            fn $method(self, mut rhs: Tensor<T, N>) -> Self::Output {
-                const {
-                    assert!(
-                        M <= N,
-                        "cannot broadcast higher-rank tensor into lower-rank tensor"
-                    );
-                }
-                assert_eq!(
-                    self.shape(),
-                    rhs.shape()[N - M..],
-                    "broadcast shape mismatch"
-                );
-
-                let lhs_slice = self.as_slice();
-                rhs.view_mut().chunks::<M>().for_each(|chunk| {
-                    for (&a, b) in zip(lhs_slice, chunk.into_mut_slice()) {
-                        *b = a.$method(*b);
-                    }
-                });
-                rhs
-            }
-        }
-    };
-}
-
-impl_owned_binary_ops!(Add, add, AddAssign, add_assign);
-impl_owned_binary_ops!(Sub, sub, SubAssign, sub_assign);
-impl_owned_binary_ops!(Mul, mul, MulAssign, mul_assign);
-impl_owned_binary_ops!(Div, div, DivAssign, div_assign);
-
-#[cfg(feature = "alloc")]
-impl<T: Copy + core::ops::Neg<Output = T>, const N: usize> core::ops::Neg for Tensor<T, N> {
-    type Output = Tensor<T, N>;
-    #[inline]
-    fn neg(mut self) -> Self::Output {
-        for x in self.as_mut_slice() {
-            *x = -*x;
-        }
-        self
-    }
-}
-
-// ============================================================================
-// Display
-// ============================================================================
+// -- Formatting --------------------------------------------------------------
 
 fn fmt_nd<T: Display>(
     f: &mut Formatter<'_>,
@@ -344,31 +372,3 @@ fn fmt_nd<T: Display>(
         }
     }
 }
-
-// ============================================================================
-// Aliases & Rank-Specific Helpers
-// ============================================================================
-
-#[cfg(feature = "alloc")]
-/// Owned 0-dimensional scalar tensor.
-pub type Scalar<T> = Tensor<T, 0>;
-/// Immutable 0-dimensional scalar view.
-pub type ScalarView<'a, T> = TensorView<'a, T, 0>;
-/// Mutable 0-dimensional scalar view.
-pub type ScalarViewMut<'a, T> = TensorViewMut<'a, T, 0>;
-
-#[cfg(feature = "alloc")]
-/// Owned 1-dimensional vector tensor.
-pub type Vector<T> = Tensor<T, 1>;
-/// Immutable 1-dimensional vector view.
-pub type VectorView<'a, T> = TensorView<'a, T, 1>;
-/// Mutable 1-dimensional vector view.
-pub type VectorViewMut<'a, T> = TensorViewMut<'a, T, 1>;
-
-#[cfg(feature = "alloc")]
-/// Owned 2-dimensional matrix tensor.
-pub type Matrix<T> = Tensor<T, 2>;
-/// Immutable 2-dimensional matrix view.
-pub type MatrixView<'a, T> = TensorView<'a, T, 2>;
-/// Mutable 2-dimensional matrix view.
-pub type MatrixViewMut<'a, T> = TensorViewMut<'a, T, 2>;

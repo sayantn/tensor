@@ -18,6 +18,11 @@
     feature = "alloc",
     doc = "as well as their owned counterparts ([`Scalar`], [`Vector`], and [`Matrix`])."
 )]
+#![cfg_attr(
+    feature = "document-features",
+    cfg_attr(doc, doc = "\n# Feature Flags\n"),
+    cfg_attr(doc, doc = document_features::document_features!())
+)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![no_std]
 #![warn(

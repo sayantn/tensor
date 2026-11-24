@@ -1,55 +1,77 @@
 [package]
-name        = "tensor"
-version     = "0.1.0"
-edition     = "2024"
-autobenches = false
+name    = "tensor"
+version = "0.1.0"
+edition = "2024"
 
 [workspace]
 members = [".", "bench"]
 
 [features]
-default = ["backend-gemm", "std"]
+## Enables `std` and the pure-Rust `gemm` backend.
+default = ["std", "backend-gemm"]
 
+#! ### Environment
+
+## Enables heap-allocated owned tensors (`Tensor`, `Scalar`, `Vector`, `Matrix`).
 alloc = ["half?/alloc"]
+
+## Enables `std` support, floating-point `Min`/`Max` monoids, and `std` features on enabled backends.
 std = [
     "alloc",
-    "half?/std",
-    "matrixmultiply?/std",
-    "gemm?/std",
     "num-traits/std",
+    "half?/std",
+    "gemm?/std",
+    "matrixmultiply?/std",
 ]
 
-# Scalar support (enables `f16` in `gemm`) (implies `backend-gemm`)
+#! ### GEMM Backends
+
+## Enables the pure-Rust `gemm` backend (`GemmCrate`) for `f32` and `f64`.
+backend-gemm = ["dep:gemm"]
+
+## Enables the pure-Rust `matrixmultiply` backend (`MatrixMultiplyCrate`) for `f32` and `f64`.
+backend-matrixmultiply = ["dep:matrixmultiply"]
+
+## Enables the system CBLAS backend (`Blas`) for `f32` and `f64`.
+backend-blas = ["dep:cblas-sys"]
+
+#! ### Backend Extensions & Tuning
+
+## Enables `half::f16` support in `GemmCrate` (implies `backend-gemm`).
 gemm-f16 = ["backend-gemm", "dep:half", "gemm/f16"]
 
-# GEMM Backends
-backend-blas           = ["dep:cblas-sys"]
-backend-matrixmultiply = ["dep:matrixmultiply"]
-backend-gemm           = ["dep:gemm"]
+## Enables WebAssembly SIMD128 kernels in `gemm` (implies `backend-gemm`).
+gemm-wasm-simd128 = ["backend-gemm", "gemm/wasm-simd128-enable"]
 
-# Backend tuning & architecture extensions (imply their respective backend)
+## Enables experimental Apple AMX kernels in `gemm` (implies `backend-gemm`).
+gemm-apple-amx = ["backend-gemm", "gemm/experimental-apple-amx"]
+
+## Enables compile-time kernel configuration in `matrixmultiply` (implies `backend-matrixmultiply`).
 matrixmultiply-constconf = [
     "backend-matrixmultiply",
     "matrixmultiply/constconf",
 ]
-gemm-wasm-simd128 = ["backend-gemm", "gemm/wasm-simd128-enable"]
-gemm-apple-amx = ["backend-gemm", "gemm/experimental-apple-amx"]
 
 [dependencies]
+# Core
 num-traits = { version = "0.2.19", default-features = false }
 
+# Optional scalar types
 half = { version = "2.7.1", default-features = false, features = [
     "num-traits",
 ], optional = true }
 
-cblas-sys = { version = "0.3.0", optional = true }
+# Optional GEMM backends
 gemm = { version = "0.19.0", default-features = false, features = [
     "x86-v4",
 ], optional = true }
 matrixmultiply = { version = "0.3.11", default-features = false, features = [
     "avx512",
 ], optional = true }
+cblas-sys = { version = "0.3.0", optional = true }
+
+# Documentation
+document-features = { version = "0.2", optional = true }
 
 [package.metadata.docs.rs]
-all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

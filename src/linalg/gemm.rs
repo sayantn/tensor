@@ -323,7 +323,7 @@ impl<T: Element> GemmBackend<T> for Naive {
             (MatrixOp::NoTrans, MatrixOp::Trans) => {
                 for (c_row, a_row) in zip(c.chunks::<1>(), a.chunks::<1>()) {
                     for (cij, b_row) in zip(c_row.into_mut_slice(), b.chunks::<1>()) {
-                        *cij += alpha * dot_slice(a_row.as_slice(), b_row.as_slice());
+                        *cij += alpha * dot_slice(a_row, b_row);
                     }
                 }
             }

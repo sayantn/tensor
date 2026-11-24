@@ -46,11 +46,7 @@ extern crate alloc;
 
 use core::fmt::{self, Display, Formatter};
 use core::iter::zip;
-use core::ops::{
-    Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Bound, Div,
-    DivAssign, Mul, MulAssign, Range, RangeBounds, Rem, RemAssign, Shl, ShlAssign, Shr, ShrAssign,
-    Sub, SubAssign,
-};
+use core::ops::{AddAssign, Bound, DivAssign, MulAssign, Range, RangeBounds, SubAssign};
 
 #[cfg(feature = "alloc")]
 mod tensor;
@@ -63,6 +59,9 @@ pub use view::*;
 pub use view_mut::*;
 
 pub mod linalg;
+
+mod reduce;
+pub use reduce::*;
 
 // ============================================================================
 // Internal Helpers
@@ -163,93 +162,10 @@ macro_rules! impl_assign_ops {
             }
         }
 
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&Tensor<T, M>>
-            for TensorViewMut<'_, T, N>
-        {
-            #[inline]
-            #[track_caller]
-            fn $method(&mut self, rhs: &Tensor<T, M>) {
-                self.$method(rhs.view());
-            }
-        }
-
-        impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&TensorView<'_, T, M>>
-            for TensorViewMut<'_, T, N>
-        {
-            #[inline]
-            #[track_caller]
-            fn $method(&mut self, rhs: &TensorView<'_, T, M>) {
-                self.$method(*rhs);
-            }
-        }
-
-        impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&TensorViewMut<'_, T, M>>
-            for TensorViewMut<'_, T, N>
-        {
-            #[inline]
-            #[track_caller]
-            fn $method(&mut self, rhs: &TensorViewMut<'_, T, M>) {
-                self.$method(rhs.view());
-            }
-        }
-
         impl<T: Copy + $trait<T>, const N: usize> $trait<T> for TensorViewMut<'_, T, N> {
             #[inline]
             fn $method(&mut self, rhs: T) {
                 self.$method(ScalarView::scalar(&rhs))
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<TensorView<'_, T, M>>
-            for Tensor<T, N>
-        {
-            #[inline]
-            #[track_caller]
-            fn $method(&mut self, rhs: TensorView<'_, T, M>) {
-                self.view_mut().$method(rhs);
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&Tensor<T, M>>
-            for Tensor<T, N>
-        {
-            #[inline]
-            #[track_caller]
-            fn $method(&mut self, rhs: &Tensor<T, M>) {
-                self.$method(rhs.view());
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&TensorView<'_, T, M>>
-            for Tensor<T, N>
-        {
-            #[inline]
-            #[track_caller]
-            fn $method(&mut self, rhs: &TensorView<'_, T, M>) {
-                self.$method(*rhs);
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&TensorViewMut<'_, T, M>>
-            for Tensor<T, N>
-        {
-            #[inline]
-            #[track_caller]
-            fn $method(&mut self, rhs: &TensorViewMut<'_, T, M>) {
-                self.$method(rhs.view());
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $trait<T>, const N: usize> $trait<T> for Tensor<T, N> {
-            #[inline]
-            fn $method(&mut self, rhs: T) {
-                self.view_mut().$method(rhs);
             }
         }
     };
@@ -259,231 +175,39 @@ impl_assign_ops!(AddAssign, add_assign, +=);
 impl_assign_ops!(SubAssign, sub_assign, -=);
 impl_assign_ops!(MulAssign, mul_assign, *=);
 impl_assign_ops!(DivAssign, div_assign, /=);
-impl_assign_ops!(RemAssign, rem_assign, %=);
-impl_assign_ops!(BitAndAssign, bitand_assign, &=);
-impl_assign_ops!(BitOrAssign, bitor_assign, |=);
-impl_assign_ops!(BitXorAssign, bitxor_assign, ^=);
-impl_assign_ops!(ShlAssign, shl_assign, <<=);
-impl_assign_ops!(ShrAssign, shr_assign, >>=);
-
-macro_rules! impl_binary_into_ops {
-    ($fn_name:ident, $trait:ident, $op:tt, $doc:expr) => {
-        impl<T, const N: usize> TensorView<'_, T, N> {
-            #[doc = $doc]
-            ///
-            /// # Panics
-            ///
-            /// Panics at compile time if `M > N`, or at runtime if `self.shape() != out.shape()`
-            /// or if `rhs.shape()` does not match `&out.shape()[N - M..]`.
-            #[inline]
-            #[track_caller]
-            pub fn $fn_name<const M: usize>(
-                self,
-                rhs: TensorView<'_, T, M>,
-                out: TensorViewMut<'_, T, N>,
-            ) where
-                T: Copy + $trait<T, Output = T>,
-            {
-                const {
-                    assert!(
-                        M <= N,
-                        "cannot broadcast higher-rank tensor into lower-rank tensor"
-                    );
-                }
-                assert_eq!(self.shape(), out.shape(), "lhs/output shape mismatch");
-                assert_eq!(
-                    out.shape()[N - M..],
-                    rhs.shape(),
-                    "rhs broadcast shape mismatch"
-                );
-
-                let rhs_slice = rhs.as_slice();
-                for (out_chunk, lhs_chunk) in zip(out.chunks::<M>(), self.chunks::<M>()) {
-                    for (o, (&a, &b)) in zip(
-                        out_chunk.into_mut_slice(),
-                        zip(lhs_chunk.as_slice(), rhs_slice),
-                    ) {
-                        *o = a $op b;
-                    }
-                }
-            }
-        }
-
-        impl<T, const N: usize> TensorViewMut<'_, T, N> {
-            #[doc = $doc]
-            ///
-            /// # Panics
-            ///
-            /// Panics at compile time if `M > N`, or at runtime if `self.shape() != out.shape()`
-            /// or if `rhs.shape()` does not match `&out.shape()[N - M..]`.
-            #[inline]
-            #[track_caller]
-            pub fn $fn_name<const M: usize>(
-                &self,
-                rhs: TensorView<'_, T, M>,
-                out: TensorViewMut<'_, T, N>,
-            ) where
-                T: Copy + $trait<T, Output = T>,
-            {
-                self.view().$fn_name(rhs, out);
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T, const N: usize> Tensor<T, N> {
-            #[doc = $doc]
-            ///
-            /// # Panics
-            ///
-            /// Panics at compile time if `M > N`, or at runtime if `self.shape() != out.shape()`
-            /// or if `rhs.shape()` does not match `&out.shape()[N - M..]`.
-            #[inline]
-            #[track_caller]
-            pub fn $fn_name<const M: usize>(
-                &self,
-                rhs: TensorView<'_, T, M>,
-                out: TensorViewMut<'_, T, N>,
-            ) where
-                T: Copy + $trait<T, Output = T>,
-            {
-                self.view().$fn_name(rhs, out);
-            }
-        }
-    };
-}
-
-impl_binary_into_ops!(
-    add_into,
-    Add,
-    +,
-    "Computes `out := lhs + rhs` elementwise with right-aligned broadcasting on `rhs`."
-);
-impl_binary_into_ops!(
-    sub_into,
-    Sub,
-    -,
-    "Computes `out := lhs - rhs` elementwise with right-aligned broadcasting on `rhs`."
-);
-impl_binary_into_ops!(
-    mul_into,
-    Mul,
-    *,
-    "Computes `out := lhs * rhs` elementwise with right-aligned broadcasting on `rhs`."
-);
-impl_binary_into_ops!(
-    div_into,
-    Div,
-    /,
-    "Computes `out := lhs / rhs` elementwise with right-aligned broadcasting on `rhs`."
-);
-impl_binary_into_ops!(
-    rem_into,
-    Rem,
-    %,
-    "Computes `out := lhs % rhs` elementwise with right-aligned broadcasting on `rhs`."
-);
-impl_binary_into_ops!(
-    bitand_into,
-    BitAnd,
-    &,
-    "Computes `out := lhs & rhs` elementwise with right-aligned broadcasting on `rhs`."
-);
-impl_binary_into_ops!(
-    bitor_into,
-    BitOr,
-    |,
-    "Computes `out := lhs | rhs` elementwise with right-aligned broadcasting on `rhs`."
-);
-impl_binary_into_ops!(
-    bitxor_into,
-    BitXor,
-    ^,
-    "Computes `out := lhs ^ rhs` elementwise with right-aligned broadcasting on `rhs`."
-);
-impl_binary_into_ops!(
-    shl_into,
-    Shl,
-    <<,
-    "Computes `out := lhs << rhs` elementwise with right-aligned broadcasting on `rhs`."
-);
-impl_binary_into_ops!(
-    shr_into,
-    Shr,
-    >>,
-    "Computes `out := lhs >> rhs` elementwise with right-aligned broadcasting on `rhs`."
-);
 
 macro_rules! impl_owned_binary_ops {
-    ($trait:ident, $method:ident, $assign_trait:ident, $op:tt) => {
+    ($trait:ident, $method:ident, $assign_trait:ident, $assign_method:ident) => {
         #[cfg(feature = "alloc")]
         // Tensor<T, N> + RHS (reuses `self` buffer in place; supports broadcasting M <= N)
         impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
-            $trait<TensorView<'_, T, M>> for Tensor<T, N>
+            core::ops::$trait<TensorView<'_, T, M>> for Tensor<T, N>
         {
             type Output = Tensor<T, N>;
 
             #[inline]
             #[track_caller]
             fn $method(mut self, rhs: TensorView<'_, T, M>) -> Self::Output {
-                self $op rhs;
+                self.view_mut().$assign_method(rhs);
                 self
             }
         }
 
         #[cfg(feature = "alloc")]
-        impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
-            $trait<&Tensor<T, M>> for Tensor<T, N>
-        {
-            type Output = Tensor<T, N>;
-
-            #[inline]
-            #[track_caller]
-            fn $method(self, rhs: &Tensor<T, M>) -> Self::Output {
-                self.$method(rhs.view())
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
-            $trait<&TensorView<'_, T, M>> for Tensor<T, N>
-        {
-            type Output = Tensor<T, N>;
-
-            #[inline]
-            #[track_caller]
-            fn $method(self, rhs: &TensorView<'_, T, M>) -> Self::Output {
-                self.$method(*rhs)
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
-            $trait<&TensorViewMut<'_, T, M>> for Tensor<T, N>
-        {
-            type Output = Tensor<T, N>;
-
-            #[inline]
-            #[track_caller]
-            fn $method(self, rhs: &TensorViewMut<'_, T, M>) -> Self::Output {
-                self.$method(rhs.view())
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $assign_trait<T>, const N: usize> $trait<T> for Tensor<T, N> {
+        impl<T: Copy + $assign_trait<T>, const N: usize> core::ops::$trait<T> for Tensor<T, N> {
             type Output = Tensor<T, N>;
 
             #[inline]
             fn $method(mut self, rhs: T) -> Self::Output {
-                self $op rhs;
+                self.view_mut().$assign_method(rhs);
                 self
             }
         }
 
         #[cfg(feature = "alloc")]
         // Borrowed LHS (rank M <= N) + owned Tensor<T, N> (reuses `rhs` buffer in place!)
-        impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
-            $trait<Tensor<T, N>> for TensorView<'_, T, M>
+        impl<T: Copy + core::ops::$trait<T, Output = T>, const N: usize, const M: usize>
+            core::ops::$trait<Tensor<T, N>> for TensorView<'_, T, M>
         {
             type Output = Tensor<T, N>;
 
@@ -511,110 +235,25 @@ macro_rules! impl_owned_binary_ops {
                 rhs
             }
         }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
-            $trait<Tensor<T, N>> for &Tensor<T, M>
-        {
-            type Output = Tensor<T, N>;
-
-            #[inline]
-            #[track_caller]
-            fn $method(self, rhs: Tensor<T, N>) -> Self::Output {
-                self.view().$method(rhs)
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
-            $trait<Tensor<T, N>> for &TensorView<'_, T, M>
-        {
-            type Output = Tensor<T, N>;
-
-            #[inline]
-            #[track_caller]
-            fn $method(self, rhs: Tensor<T, N>) -> Self::Output {
-                (*self).$method(rhs)
-            }
-        }
-
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
-            $trait<Tensor<T, N>> for &TensorViewMut<'_, T, M>
-        {
-            type Output = Tensor<T, N>;
-
-            #[inline]
-            #[track_caller]
-            fn $method(self, rhs: Tensor<T, N>) -> Self::Output {
-                self.view().$method(rhs)
-            }
-        }
     };
 }
 
-impl_owned_binary_ops!(Add, add, AddAssign, +=);
-impl_owned_binary_ops!(Sub, sub, SubAssign, -=);
-impl_owned_binary_ops!(Mul, mul, MulAssign, *=);
-impl_owned_binary_ops!(Div, div, DivAssign, /=);
-impl_owned_binary_ops!(Rem, rem, RemAssign, %=);
-impl_owned_binary_ops!(BitAnd, bitand, BitAndAssign, &=);
-impl_owned_binary_ops!(BitOr, bitor, BitOrAssign, |=);
-impl_owned_binary_ops!(BitXor, bitxor, BitXorAssign, ^=);
-impl_owned_binary_ops!(Shl, shl, ShlAssign, <<=);
-impl_owned_binary_ops!(Shr, shr, ShrAssign, >>=);
+impl_owned_binary_ops!(Add, add, AddAssign, add_assign);
+impl_owned_binary_ops!(Sub, sub, SubAssign, sub_assign);
+impl_owned_binary_ops!(Mul, mul, MulAssign, mul_assign);
+impl_owned_binary_ops!(Div, div, DivAssign, div_assign);
 
-macro_rules! impl_scalar_lhs_ops {
-    ($trait:ident, $method:ident => $($ty:ty),+ $(,)?) => {
-        $(
-            #[cfg(feature = "alloc")]
-            impl<const N: usize> $trait<Tensor<$ty, N>> for $ty {
-                type Output = Tensor<$ty, N>;
-
-                #[inline]
-                fn $method(self, mut rhs: Tensor<$ty, N>) -> Self::Output {
-                    for b in rhs.as_mut_slice() {
-                        *b = $trait::$method(self, *b);
-                    }
-                    rhs
-                }
-            }
-        )+
-    };
-}
-
-impl_scalar_lhs_ops!(Add, add => f32, f64, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
-impl_scalar_lhs_ops!(Sub, sub => f32, f64, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
-impl_scalar_lhs_ops!(Mul, mul => f32, f64, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
-impl_scalar_lhs_ops!(Div, div => f32, f64, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
-impl_scalar_lhs_ops!(Rem, rem => f32, f64, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
-impl_scalar_lhs_ops!(BitAnd, bitand => i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
-impl_scalar_lhs_ops!(BitOr, bitor => i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
-impl_scalar_lhs_ops!(BitXor, bitxor => i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
-impl_scalar_lhs_ops!(Shl, shl => i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
-impl_scalar_lhs_ops!(Shr, shr => i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
-
-macro_rules! impl_owned_unary_ops {
-    ($trait:ident, $method:ident, $op:tt) => {
-        #[cfg(feature = "alloc")]
-        impl<T: Copy + core::ops::$trait<Output = T>, const N: usize> core::ops::$trait
-            for Tensor<T, N>
-        {
-            type Output = Tensor<T, N>;
-
-            #[inline]
-            fn $method(mut self) -> Self::Output {
-                for x in self.as_mut_slice() {
-                    *x = $op(*x);
-                }
-                self
-            }
+#[cfg(feature = "alloc")]
+impl<T: Copy + core::ops::Neg<Output = T>, const N: usize> core::ops::Neg for Tensor<T, N> {
+    type Output = Tensor<T, N>;
+    #[inline]
+    fn neg(mut self) -> Self::Output {
+        for x in self.as_mut_slice() {
+            *x = -*x;
         }
-    };
+        self
+    }
 }
-
-impl_owned_unary_ops!(Neg, neg, -);
-impl_owned_unary_ops!(Not, not, !);
 
 // ============================================================================
 // Display

@@ -7,8 +7,8 @@ use core::slice::{Iter, IterMut};
 use core::{array, fmt, slice};
 
 use crate::{
-    MatrixViewMut, ScalarViewMut, TensorView, VectorViewMut, linear_offset, linear_offset_checked,
-    resolve_range, unchecked_shape_len, validate_shape,
+    MatrixViewMut, Monoid, ScalarViewMut, TensorView, VectorViewMut, linear_offset,
+    linear_offset_checked, resolve_range, unchecked_shape_len, validate_shape,
 };
 
 #[cfg(feature = "alloc")]
@@ -357,6 +357,73 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
         // SAFETY: `ptr` points to a valid, initialized, exclusively borrowed `T`.
         Some(unsafe { ptr.as_mut() })
     }
+
+    /// Mutates each element with `f` in place while reducing the returned
+    /// values using the [`Monoid`] `op` across 16 independent accumulators.
+    #[inline]
+    #[must_use]
+    pub fn reduce_by_mut<Out: Copy>(
+        &mut self,
+        op: impl Monoid<Out>,
+        mut f: impl FnMut(&mut T) -> Out,
+    ) -> Out {
+        const LANES: usize = 16;
+        let (chunks, rem) = self.as_mut_slice().as_chunks_mut::<LANES>();
+
+        let mut acc = [op.identity(); LANES];
+        for chunk in chunks {
+            for l in 0..LANES {
+                acc[l] = op.combine(acc[l], f(&mut chunk[l]));
+            }
+        }
+
+        let mut total = acc[0];
+        for &lane in &acc[1..] {
+            total = op.combine(total, lane);
+        }
+        for x in rem {
+            total = op.combine(total, f(x));
+        }
+        total
+    }
+
+    /// Mutates each elementwise pair `(a, b)` with `f` in place while reducing
+    /// the returned values using `op` across 16 independent accumulators.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.shape() != rhs.shape()`.
+    #[inline]
+    #[must_use]
+    #[track_caller]
+    pub fn zip_reduce_mut<U, Out: Copy>(
+        &mut self,
+        rhs: TensorView<'_, U, N>,
+        op: impl Monoid<Out>,
+        mut f: impl FnMut(&mut T, &U) -> Out,
+    ) -> Out {
+        const LANES: usize = 16;
+        assert_eq!(self.shape(), rhs.shape(), "tensor shape mismatch");
+
+        let (ac, ar) = self.as_mut_slice().as_chunks_mut::<LANES>();
+        let (bc, br) = rhs.as_slice().as_chunks::<LANES>();
+
+        let mut acc = [op.identity(); LANES];
+        for (aa, ba) in core::iter::zip(ac, bc) {
+            for l in 0..LANES {
+                acc[l] = op.combine(acc[l], f(&mut aa[l], &ba[l]));
+            }
+        }
+
+        let mut total = acc[0];
+        for &lane in &acc[1..] {
+            total = op.combine(total, lane);
+        }
+        for (a, b) in core::iter::zip(ar, br) {
+            total = op.combine(total, f(a, b));
+        }
+        total
+    }
 }
 
 impl<T, const N: usize> Index<[usize; N]> for TensorViewMut<'_, T, N> {
@@ -439,6 +506,19 @@ impl<'a, T> ScalarViewMut<'a, T> {
         // SAFETY: A rank-0 `ScalarViewMut` has shape `[]` (`len == 1`), so consuming
         // `self` transfers exclusive `'a` access to `self.ptr`.
         unsafe { self.ptr.as_mut() }
+    }
+}
+
+impl<'a, T> VectorViewMut<'a, T> {
+    /// Creates a 1-dimensional [`VectorViewMut`] borrowing a mutable slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `val` is empty
+    #[inline]
+    #[track_caller]
+    pub fn vector(val: &'a mut [T]) -> Self {
+        Self::from_slice(val, [val.len()])
     }
 }
 

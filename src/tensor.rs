@@ -1,15 +1,10 @@
 use core::fmt;
 use core::fmt::{Display, Formatter};
-use core::ops::{Index, IndexMut};
-use core::slice::{Iter, IterMut};
 
 use alloc::boxed::Box;
 use alloc::{vec, vec::Vec};
 
-use crate::{
-    Matrix, Scalar, TensorView, TensorViewMut, Vector, shape_len, linear_offset,
-    linear_offset_checked, validate_shape,
-};
+use crate::{Matrix, Scalar, TensorView, TensorViewMut, Vector, shape_len, validate_shape};
 
 /// An owned, heap-allocated, row-major dense tensor of rank `N`.
 ///
@@ -154,44 +149,6 @@ impl<T, const N: usize> Tensor<T, N> {
         TensorViewMut::new(self.shape, &mut self.data)
     }
 
-    /// Returns an iterator over immutable element references in row-major
-    /// order.
-    #[inline]
-    pub fn iter(&self) -> Iter<'_, T> {
-        self.data.iter()
-    }
-
-    /// Returns an iterator over mutable element references in row-major order.
-    #[inline]
-    pub fn iter_mut(&mut self) -> IterMut<'_, T> {
-        self.data.iter_mut()
-    }
-
-    /// Fills every element in the tensor with clones of `value`.
-    #[inline]
-    pub fn fill(&mut self, value: T)
-    where
-        T: Clone,
-    {
-        self.data.fill(value);
-    }
-
-    /// Copies `src` into every trailing rank-`M` slice of `self` (NumPy-style
-    /// right-aligned broadcasting).
-    ///
-    /// # Panics
-    ///
-    /// Panics at compile time if `M > N`, or at runtime if `src.shape()` does
-    /// not match `&self.shape()[N - M..]`.
-    #[inline]
-    #[track_caller]
-    pub fn assign<const M: usize>(&mut self, src: TensorView<'_, T, M>)
-    where
-        T: Copy,
-    {
-        self.view_mut().assign(src);
-    }
-
     /// Consumes and reshapes the owned tensor to rank `M` and `new_shape`
     /// without reallocating.
     ///
@@ -217,70 +174,6 @@ impl<T, const N: usize> Tensor<T, N> {
             shape: [self.len()],
             data: self.data,
         }
-    }
-
-    /// Returns a reference to the element at `index`, or `None` if any
-    /// coordinate is out of bounds.
-    #[inline]
-    #[must_use]
-    pub fn get(&self, index: [usize; N]) -> Option<&T> {
-        let off = linear_offset_checked(&self.shape, &index)?;
-        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
-        // and `self.data.len()` equals the product of `self.shape`.
-        Some(unsafe { self.data.get_unchecked(off) })
-    }
-
-    /// Returns a mutable reference to the element at `index`, or `None` if any
-    /// coordinate is out of bounds.
-    #[inline]
-    #[must_use]
-    pub fn get_mut(&mut self, index: [usize; N]) -> Option<&mut T> {
-        let off = linear_offset_checked(&self.shape, &index)?;
-        // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
-        // and `self.data.len()` equals the product of `self.shape`.
-        Some(unsafe { self.data.get_unchecked_mut(off) })
-    }
-}
-
-impl<T, const N: usize> Index<[usize; N]> for Tensor<T, N> {
-    type Output = T;
-
-    #[inline]
-    #[track_caller]
-    fn index(&self, index: [usize; N]) -> &Self::Output {
-        let off = linear_offset(&self.shape, &index);
-        // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`.
-        unsafe { self.data.get_unchecked(off) }
-    }
-}
-
-impl<T, const N: usize> IndexMut<[usize; N]> for Tensor<T, N> {
-    #[inline]
-    #[track_caller]
-    fn index_mut(&mut self, index: [usize; N]) -> &mut Self::Output {
-        let off = linear_offset(&self.shape, &index);
-        // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`.
-        unsafe { self.data.get_unchecked_mut(off) }
-    }
-}
-
-impl<'a, T, const N: usize> IntoIterator for &'a Tensor<T, N> {
-    type Item = &'a T;
-    type IntoIter = Iter<'a, T>;
-
-    #[inline]
-    fn into_iter(self) -> Self::IntoIter {
-        self.data.iter()
-    }
-}
-
-impl<'a, T, const N: usize> IntoIterator for &'a mut Tensor<T, N> {
-    type Item = &'a mut T;
-    type IntoIter = IterMut<'a, T>;
-
-    #[inline]
-    fn into_iter(self) -> Self::IntoIter {
-        self.data.iter_mut()
     }
 }
 

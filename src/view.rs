@@ -1,5 +1,5 @@
 use core::fmt::{Display, Formatter};
-use core::iter::FusedIterator;
+use core::iter::{FusedIterator, zip};
 use core::marker::PhantomData;
 use core::ops::{Index, RangeBounds};
 use core::ptr::NonNull;
@@ -7,7 +7,7 @@ use core::slice::Iter;
 use core::{array, fmt, slice};
 
 use crate::{
-    MatrixView, ScalarView, TensorViewMut, VectorView, fmt_nd, linear_offset,
+    MatrixView, Monoid, ScalarView, TensorViewMut, VectorView, fmt_nd, linear_offset,
     linear_offset_checked, resolve_range, unchecked_shape_len, validate_shape,
 };
 
@@ -260,6 +260,82 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
         // SAFETY: `ptr` points to a valid, initialized `T` for lifetime `'a`.
         Some(unsafe { ptr.as_ref() })
     }
+
+    /// Maps each element with `f` and reduces the mapped values using the
+    /// associative, commutative [`Monoid`] `op` across 16 independent
+    /// accumulators for SIMD vectorization.
+    #[inline]
+    #[must_use]
+    pub fn reduce_by<Out: Copy>(self, op: impl Monoid<Out>, mut f: impl FnMut(&T) -> Out) -> Out {
+        const LANES: usize = 16;
+        let (chunks, rem) = self.as_slice().as_chunks::<LANES>();
+
+        let mut acc = [op.identity(); LANES];
+        for chunk in chunks {
+            for l in 0..LANES {
+                acc[l] = op.combine(acc[l], f(&chunk[l]));
+            }
+        }
+
+        let mut total = acc[0];
+        for &lane in &acc[1..] {
+            total = op.combine(total, lane);
+        }
+        for x in rem {
+            total = op.combine(total, f(x));
+        }
+        total
+    }
+
+    /// Reduces all elements using the associative, commutative [`Monoid`] `op`
+    /// across 16 independent accumulators.
+    #[inline]
+    #[must_use]
+    pub fn reduce(self, op: impl Monoid<T>) -> T
+    where
+        T: Copy,
+    {
+        self.reduce_by(op, |&x| x)
+    }
+
+    /// Maps each elementwise pair `(a, b)` from `self` and `rhs` with `f` and
+    /// reduces the mapped values using the [`Monoid`] `op` across 16
+    /// independent accumulators.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.shape() != rhs.shape()`.
+    #[inline]
+    #[must_use]
+    #[track_caller]
+    pub fn zip_reduce<U, Out: Copy>(
+        self,
+        rhs: TensorView<'_, U, N>,
+        op: impl Monoid<Out>,
+        mut f: impl FnMut(&T, &U) -> Out,
+    ) -> Out {
+        const LANES: usize = 16;
+        assert_eq!(self.shape(), rhs.shape(), "tensor shape mismatch");
+
+        let (ac, ar) = self.as_slice().as_chunks::<LANES>();
+        let (bc, br) = rhs.as_slice().as_chunks::<LANES>();
+
+        let mut acc = [op.identity(); LANES];
+        for (aa, ba) in zip(ac, bc) {
+            for l in 0..LANES {
+                acc[l] = op.combine(acc[l], f(&aa[l], &ba[l]));
+            }
+        }
+
+        let mut total = acc[0];
+        for &lane in &acc[1..] {
+            total = op.combine(total, lane);
+        }
+        for (a, b) in zip(ar, br) {
+            total = op.combine(total, f(a, b));
+        }
+        total
+    }
 }
 
 impl<T, const N: usize> Index<[usize; N]> for TensorView<'_, T, N> {
@@ -318,6 +394,19 @@ impl<'a, T> ScalarView<'a, T> {
         // SAFETY: A rank-0 `ScalarView` has shape `[]` (`len == 1`), so `self.ptr`
         // points to a valid, initialized `T` for lifetime `'a`.
         unsafe { self.ptr.as_ref() }
+    }
+}
+
+impl<'a, T> VectorView<'a, T> {
+    /// Creates a 1-dimensional [`VectorView`] borrowing a slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `val` is empty
+    #[inline]
+    #[track_caller]
+    pub fn vector(val: &'a [T]) -> Self {
+        Self::from_slice(val, [val.len()])
     }
 }
 

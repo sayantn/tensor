@@ -2,7 +2,7 @@
 //! [`VectorView`], [`VectorViewMut`], [`MatrixView`], and [`MatrixViewMut`].
 
 use crate::{
-    MatrixView, MatrixViewMut, TensorView, TensorViewMut, VectorView, VectorViewMut,
+    MatrixView, MatrixViewMut, Sum, TensorView, TensorViewMut, VectorView, VectorViewMut,
     unchecked_shape_len,
 };
 
@@ -87,28 +87,8 @@ pub fn axpy<T: Element, const N: usize, const M: usize>(
 
 #[inline(always)]
 #[allow(clippy::inline_always)]
-pub(crate) fn dot_slice<T: Element>(x: &[T], y: &[T]) -> T {
-    const LANES: usize = 16;
-    debug_assert_eq!(x.len(), y.len());
-
-    let (xc, xr) = x.as_chunks::<LANES>();
-    let (yc, yr) = y.as_chunks::<LANES>();
-
-    let mut acc = [T::zero(); LANES];
-    for (xa, ya) in zip(xc, yc) {
-        for l in 0..LANES {
-            acc[l] += xa[l] * ya[l];
-        }
-    }
-
-    let mut sum = T::zero();
-    for v in acc {
-        sum += v;
-    }
-    for (&xv, &yv) in zip(xr, yr) {
-        sum += xv * yv;
-    }
-    sum
+pub(crate) fn dot_slice<T: Element>(x: VectorView<'_, T>, y: VectorView<'_, T>) -> T {
+    x.zip_reduce(y, Sum, |&a, &b| a * b)
 }
 
 /// Computes the inner product `x^T y` (BLAS Level-1 `dot`) using 16
@@ -123,7 +103,7 @@ pub(crate) fn dot_slice<T: Element>(x: &[T], y: &[T]) -> T {
 #[track_caller]
 pub fn dot<T: Element>(x: VectorView<'_, T>, y: VectorView<'_, T>) -> T {
     assert_eq!(x.len(), y.len(), "vector length mismatch");
-    dot_slice(x.as_slice(), y.as_slice())
+    dot_slice(x, y)
 }
 
 /// Computes `y := alpha * op(a) * x + beta * y` (BLAS Level-2 `gemv`).
@@ -160,7 +140,7 @@ pub fn gemv<T: Element>(
     match ta {
         MatrixOp::NoTrans => {
             for (yi, a_row) in zip(y_slice, a.chunks::<1>()) {
-                *yi += alpha * dot_slice(a_row.as_slice(), x_slice);
+                *yi += alpha * dot_slice(a_row, x);
             }
         }
         MatrixOp::Trans => {
@@ -196,58 +176,6 @@ pub fn gemv<T: Element>(
     }
 }
 
-#[inline(always)]
-#[allow(clippy::inline_always)]
-pub(crate) fn sum_slice<T: Element>(x: &[T]) -> T {
-    const LANES: usize = 16;
-
-    let (xc, xr) = x.as_chunks::<LANES>();
-    let mut acc = [T::zero(); LANES];
-    for xa in xc {
-        for l in 0..LANES {
-            acc[l] += xa[l];
-        }
-    }
-
-    let mut sum = T::zero();
-    for v in acc {
-        sum += v;
-    }
-    for &xv in xr {
-        sum += xv;
-    }
-    sum
-}
-
-#[inline(always)]
-#[allow(clippy::inline_always)]
-fn sum_rows_into<T: Element>(x: &[T], ncols: usize, y: &mut [T]) {
-    debug_assert_eq!(y.len(), ncols);
-    debug_assert_eq!(x.len() % ncols, 0);
-
-    let rem = if let Some(block_len) = ncols.checked_mul(4) {
-        let mut blocks = x.chunks_exact(block_len);
-        for block in &mut blocks {
-            let (r0, rest) = block.split_at(ncols);
-            let (r1, rest) = rest.split_at(ncols);
-            let (r2, r3) = rest.split_at(ncols);
-
-            for (y, ((&r0, &r1), (&r2, &r3))) in zip(&mut *y, zip(zip(r0, r1), zip(r2, r3))) {
-                *y += (r0 + r1) + (r2 + r3);
-            }
-        }
-        blocks.remainder()
-    } else {
-        x
-    };
-
-    for row in rem.chunks_exact(ncols) {
-        for (yj, &xij) in zip(&mut *y, row) {
-            *yj += xij;
-        }
-    }
-}
-
 /// Accumulates the sum of `x` along `axis` into `y`:
 /// `y[..., j, ...] := sum_i x[..., i, ...] + beta * y[..., j, ...]`.
 ///
@@ -273,31 +201,40 @@ pub fn sum_axis<T: Element, const N: usize, const M: usize>(
         array::from_fn(|i| if i < axis { x_shape[i] } else { x_shape[i + 1] });
     assert_eq!(y.shape(), expected_shape, "output shape mismatch");
 
+    if axis == N - 1 && beta.is_zero() {
+        for (dst, row) in zip(y, x.chunks::<1>()) {
+            *dst = row.reduce(Sum);
+        }
+        return;
+    }
+
     if beta.is_zero() {
         y.fill(T::zero());
     } else if beta != T::one() {
         y *= beta;
     }
 
-    let axis_len = x_shape[axis];
-    // SAFETY: this is a subslice of `x_shape`
-    let inner = unsafe { unchecked_shape_len(&x_shape[axis + 1..]) };
-    let x_slice = x.as_slice();
-    let y_slice = y.as_mut_slice();
-
-    if inner == 1 {
-        for (yi, row) in zip(y_slice, x_slice.chunks_exact(axis_len)) {
-            *yi += sum_slice(row);
+    if axis == N - 1 {
+        for (dst, row) in zip(y, x.chunks::<1>()) {
+            *dst += row.reduce(Sum);
         }
-    } else if axis == 0 {
-        sum_rows_into(x_slice, inner, y_slice);
-    } else {
-        // `axis < N - 1`: each outer block is a `[axis_len, inner]` slice reduced along axis 0.
-        for (y_block, x_block) in zip(
-            y_slice.chunks_exact_mut(inner),
-            x_slice.chunks_exact(axis_len * inner),
-        ) {
-            sum_rows_into(x_block, inner, y_block);
+        return;
+    }
+
+    // SAFETY: `x.shape()` is a valid tensor shape (all dimensions non-zero and
+    // total product fits in `usize`), so any sub-slice product is non-zero and
+    // cannot overflow `usize`.
+    let outer = unsafe { unchecked_shape_len(&x.shape()[..axis]) };
+    // SAFETY: Same invariant as above for the trailing sub-slice.
+    let inner = unsafe { unchecked_shape_len(&x.shape()[axis + 1..]) };
+    let axis_len = x.shape()[axis];
+
+    let a3 = x.reshape([outer, axis_len, inner]);
+    let c2 = y.reshape([outer, inner]);
+
+    for (a_outer, mut c_outer) in core::iter::zip(a3.chunks::<2>(), c2.chunks::<1>()) {
+        for row in a_outer.chunks::<1>() {
+            c_outer += row;
         }
     }
 }

@@ -74,6 +74,7 @@ impl Rng {
 #[test]
 fn scalar_0d_operations() {
     let mut s = Scalar::scalar(42_i32);
+    let mut s = s.view_mut();
     assert_eq!(s.shape(), []);
     assert_eq!(s.len(), 1);
     assert_eq!(s[[]], 42);
@@ -96,6 +97,7 @@ fn indexing_reshape_and_slicing() {
     // 2 x 3 x 2 tensor = 12 elements
     let data: Vec<i32> = (0..12).collect();
     let t = Tensor::from_vec(data, [2, 3, 2]);
+    let t = t.view();
 
     assert_eq!(t[[0, 0, 0]], 0);
     assert_eq!(t[[0, 2, 1]], 5);
@@ -103,16 +105,16 @@ fn indexing_reshape_and_slicing() {
     assert_eq!(t[[1, 2, 1]], 11);
 
     // Slice axis 0 with inclusive, exclusive, and unbounded ranges
-    let s1 = t.view().slice(1..2);
+    let s1 = t.slice(1..2);
     assert_eq!(s1.shape(), [1, 3, 2]);
     assert_eq!(s1[[0, 0, 0]], 6);
 
-    let s2 = t.view().slice(0..=0);
+    let s2 = t.slice(0..=0);
     assert_eq!(s2.shape(), [1, 3, 2]);
     assert_eq!(s2[[0, 2, 1]], 5);
 
     // Reshape and flatten
-    let m = t.view().reshape([4, 3]);
+    let m = t.reshape([4, 3]);
     assert_eq!(m.nrows(), 4);
     assert_eq!(m.ncols(), 3);
     assert_eq!(m[[2, 1]], 7);
@@ -125,6 +127,7 @@ fn indexing_reshape_and_slicing() {
 #[test]
 fn chunks_and_broadcast_assign_ops() {
     let mut batch = Tensor::zeros([3, 2, 2]);
+    let mut batch = batch.view_mut();
     let bias = Matrix::from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], [2, 2]);
 
     batch.assign(bias.view());
@@ -164,7 +167,7 @@ fn reject_mismatched_buffer_len() {
 #[should_panic(expected = "out of bounds")]
 fn reject_out_of_bounds_index() {
     let m = Matrix::from_vec(vec![1, 2, 3, 4], [2, 2]);
-    let _ = m[[1, 2]];
+    let _ = m.view()[[1, 2]];
 }
 
 #[test]
@@ -202,7 +205,7 @@ fn axpy_and_dot_across_simd_tails() {
         // alpha == 0 fast path should leave `y` completely untouched (even with NaN)
         let mut y_nan = Vector::from_vec(vec![f32::NAN; n], [n]);
         axpy(0.0, x.view(), y_nan.view_mut());
-        assert!(y_nan.iter().all(|v| v.is_nan()));
+        assert!(y_nan.view().iter().all(|v| v.is_nan()));
 
         // dot product check
         let actual_dot = dot(x.view(), y.view());
@@ -473,13 +476,14 @@ fn gemm_f16_match_naive() {
         c_gemm.view_mut(),
     );
 
-    for (r, g) in c_ref.iter().zip(c_gemm.iter()) {
+    for (r, g) in c_ref.view().iter().zip(c_gemm.view()) {
         assert!((r.to_f32() - g.to_f32()).abs() <= 5e-2);
     }
 }
 #[test]
 fn split_at_disjoint_mutable_views() {
     let mut m = Matrix::from_vec((0..20).collect(), [5, 4]);
+    let mut m = m.view_mut();
 
     let (top, bottom) = m.view().split_at(2);
     assert_eq!(top.shape(), [2, 4]);
@@ -502,68 +506,32 @@ fn split_at_disjoint_mutable_views() {
 fn binary_into_and_owned_ops() {
     let a = Matrix::from_vec(vec![10.0_f32, 20.0, 30.0, 40.0, 50.0, 60.0], [2, 3]);
     let b = Vector::from_vec(vec![1.0_f32, 2.0, 3.0], [3]);
-    let mut out = Matrix::zeros([2, 3]);
-
-    // Broadcasted *_into ops
-    a.view().add_into(b.view(), out.view_mut());
-    assert_close_f32(out.as_slice(), &[11.0, 22.0, 33.0, 41.0, 52.0, 63.0], 1e-6);
-
-    a.view().sub_into(b.view(), out.view_mut());
-    assert_close_f32(out.as_slice(), &[9.0, 18.0, 27.0, 39.0, 48.0, 57.0], 1e-6);
-
-    a.view().mul_into(b.view(), out.view_mut());
-    assert_close_f32(
-        out.as_slice(),
-        &[10.0, 40.0, 90.0, 40.0, 100.0, 180.0],
-        1e-6,
-    );
-
-    a.view().div_into(b.view(), out.view_mut());
-    assert_close_f32(out.as_slice(), &[10.0, 10.0, 10.0, 40.0, 25.0, 20.0], 1e-6);
 
     // Owned LHS + borrowed RHS (in-place reuse, with broadcasting)
-    let r1 = a.clone() + &b;
+    let r1 = a.clone() + b.view();
     assert_close_f32(r1.as_slice(), &[11.0, 22.0, 33.0, 41.0, 52.0, 63.0], 1e-6);
 
     // Borrowed LHS (broadcasted) - owned RHS (non-commutative check)
-    let r2 = &b - a.clone();
+    let r2 = b.view() - a.clone();
     assert_close_f32(
         r2.as_slice(),
         &[-9.0, -18.0, -27.0, -39.0, -48.0, -57.0],
         1e-6,
     );
-
-    // Scalar LHS and unary Neg
-    let r3 = -(100.0_f32 - a);
-    assert_close_f32(
-        r3.as_slice(),
-        &[-90.0, -80.0, -70.0, -60.0, -50.0, -40.0],
-        1e-6,
-    );
-
-    // Bitwise & unary Not on integers
-    let bits = Vector::from_vec(vec![0b1010_u8, 0b1100], [2]);
-    let masked = (!bits) & 0b0000_1111_u8;
-    assert_eq!(masked.as_slice(), &[0b0101, 0b0011]);
 }
 
 #[test]
 fn gemv_trans_unrolled_4_rows_and_remainder() {
     // 6x5 matrix -> exercises 1 unrolled 4-row block + 2 remainder rows in MatrixOp::Trans
     let a = Matrix::from_vec((1..=30).map(|v| v as f32).collect(), [6, 5]);
+    let a = a.view();
     let x = Vector::from_vec(vec![1.0_f32, -2.0, 3.0, -4.0, 5.0, -6.0], [6]);
     let mut y = Vector::from_vec(vec![0.5_f32; 5], [5]);
 
-    gemv(
-        2.0,
-        (a.view(), MatrixOp::Trans),
-        x.view(),
-        4.0,
-        y.view_mut(),
-    );
+    gemv(2.0, (a, MatrixOp::Trans), x.view(), 4.0, y.view_mut());
 
     let mut expected = [0.5_f32 * 4.0; 5];
-    for (i, &xi) in x.iter().enumerate() {
+    for (i, &xi) in x.view().iter().enumerate() {
         for (j, ej) in expected.iter_mut().enumerate() {
             *ej += 2.0 * a[[i, j]] * xi;
         }
@@ -575,10 +543,12 @@ fn gemv_trans_unrolled_4_rows_and_remainder() {
 fn sum_axis_3d_all_axes_and_trailing_one() {
     // 2 x 3 x 4 tensor
     let x = Tensor::from_vec((1..=24).map(|v| v as f32).collect(), [2, 3, 4]);
+    let x = x.view();
 
     // axis = 0 -> [3, 4]
     let mut y0 = Matrix::zeros([3, 4]);
-    sum_axis(x.view(), 0, 0.0, y0.view_mut());
+    let mut y0 = y0.view_mut();
+    sum_axis(x, 0, 0.0, y0.view_mut());
     for j in 0..3 {
         for k in 0..4 {
             assert_close_f32(&[y0[[j, k]]], &[x[[0, j, k]] + x[[1, j, k]]], 1e-5);
@@ -587,7 +557,8 @@ fn sum_axis_3d_all_axes_and_trailing_one() {
 
     // axis = 1 (middle axis, 0 < axis < N - 1) -> [2, 4]
     let mut y1 = Matrix::zeros([2, 4]);
-    sum_axis(x.view(), 1, 0.0, y1.view_mut());
+    let mut y1 = y1.view_mut();
+    sum_axis(x, 1, 0.0, y1.view_mut());
     for i in 0..2 {
         for k in 0..4 {
             let exp = x[[i, 0, k]] + x[[i, 1, k]] + x[[i, 2, k]];
@@ -597,7 +568,9 @@ fn sum_axis_3d_all_axes_and_trailing_one() {
 
     // axis = 2 (innermost axis, inner == 1) -> [2, 3]
     let mut y2 = Matrix::zeros([2, 3]);
-    sum_axis(x.view(), 2, 0.0, y2.view_mut());
+
+    let mut y2 = y2.view_mut();
+    sum_axis(x, 2, 0.0, y2.view_mut());
     for i in 0..2 {
         for j in 0..3 {
             let exp = x[[i, j, 0]] + x[[i, j, 1]] + x[[i, j, 2]] + x[[i, j, 3]];

@@ -11,7 +11,13 @@ members = [".", "bench"]
 default = ["backend-gemm", "std"]
 
 alloc = ["half?/alloc"]
-std   = ["alloc", "half?/std", "matrixmultiply?/std", "gemm?/std"]
+std = [
+    "alloc",
+    "half?/std",
+    "matrixmultiply?/std",
+    "gemm?/std",
+    "num-traits/std",
+]
 
 # Scalar support (enables `f16` in `gemm`) (implies `backend-gemm`)
 gemm-f16 = ["backend-gemm", "dep:half", "gemm/f16"]

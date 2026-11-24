@@ -39,7 +39,9 @@ extern crate alloc;
 
 use core::fmt::{self, Display, Formatter};
 use core::iter::zip;
-use core::ops::{AddAssign, Bound, DivAssign, MulAssign, Range, RangeBounds, SubAssign};
+use core::ops::{
+    Add, AddAssign, Bound, Div, DivAssign, Mul, MulAssign, Range, RangeBounds, Sub, SubAssign,
+};
 
 mod tensor;
 mod view;
@@ -228,6 +230,74 @@ impl_assign_ops!(AddAssign, add_assign, +=);
 impl_assign_ops!(SubAssign, sub_assign, -=);
 impl_assign_ops!(MulAssign, mul_assign, *=);
 impl_assign_ops!(DivAssign, div_assign, /=);
+
+macro_rules! impl_binary_into_ops {
+    ($fn_name:ident, $trait:ident, $method:ident, $doc:expr) => {
+        #[doc = $doc]
+        ///
+        /// # Panics
+        ///
+        /// Panics at compile time if `M > N`, or at runtime if `lhs.shape() != out.shape()`
+        /// or if `rhs.shape()` does not match `&out.shape()[N - M..]`.
+        #[inline]
+        #[track_caller]
+        pub fn $fn_name<T, const N: usize, const M: usize>(
+            lhs: TensorView<'_, T, N>,
+            rhs: TensorView<'_, T, M>,
+            out: TensorViewMut<'_, T, N>,
+        ) where
+            T: Copy + $trait<T, Output = T>,
+        {
+            const {
+                assert!(
+                    M <= N,
+                    "cannot broadcast higher-rank tensor into lower-rank tensor"
+                );
+            }
+            assert_eq!(lhs.shape(), out.shape(), "lhs/output shape mismatch");
+            assert_eq!(
+                out.shape()[N - M..],
+                rhs.shape(),
+                "rhs broadcast shape mismatch"
+            );
+
+            let rhs_slice = rhs.as_slice();
+            for (out_chunk, lhs_chunk) in zip(out.chunks::<M>(), lhs.chunks::<M>()) {
+                for (o, (&a, &b)) in zip(
+                    out_chunk.into_mut_slice(),
+                    zip(lhs_chunk.as_slice(), rhs_slice),
+                ) {
+                    *o = a.$method(b);
+                }
+            }
+        }
+    };
+}
+
+impl_binary_into_ops!(
+    add_into,
+    Add,
+    add,
+    "Computes `out := lhs + rhs` elementwise with right-aligned broadcasting on `rhs`."
+);
+impl_binary_into_ops!(
+    sub_into,
+    Sub,
+    sub,
+    "Computes `out := lhs - rhs` elementwise with right-aligned broadcasting on `rhs`."
+);
+impl_binary_into_ops!(
+    mul_into,
+    Mul,
+    mul,
+    "Computes `out := lhs * rhs` elementwise with right-aligned broadcasting on `rhs`."
+);
+impl_binary_into_ops!(
+    div_into,
+    Div,
+    div,
+    "Computes `out := lhs / rhs` elementwise with right-aligned broadcasting on `rhs`."
+);
 
 // ============================================================================
 // Display

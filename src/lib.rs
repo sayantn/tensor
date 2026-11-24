@@ -132,6 +132,7 @@ macro_rules! impl_assign_ops {
             for TensorViewMut<'_, T, N>
         {
             #[inline]
+            #[track_caller]
             fn $method(&mut self, rhs: TensorView<'_, T, M>) {
                 const {
                     assert!(
@@ -153,6 +154,7 @@ macro_rules! impl_assign_ops {
             for TensorViewMut<'_, T, N>
         {
             #[inline]
+            #[track_caller]
             fn $method(&mut self, rhs: &Tensor<T, M>) {
                 self.$method(rhs.view());
             }
@@ -162,6 +164,7 @@ macro_rules! impl_assign_ops {
             for TensorViewMut<'_, T, N>
         {
             #[inline]
+            #[track_caller]
             fn $method(&mut self, rhs: &TensorView<'_, T, M>) {
                 self.$method(*rhs);
             }
@@ -171,6 +174,7 @@ macro_rules! impl_assign_ops {
             for TensorViewMut<'_, T, N>
         {
             #[inline]
+            #[track_caller]
             fn $method(&mut self, rhs: &TensorViewMut<'_, T, M>) {
                 self.$method(rhs.view());
             }
@@ -187,6 +191,7 @@ macro_rules! impl_assign_ops {
             for Tensor<T, N>
         {
             #[inline]
+            #[track_caller]
             fn $method(&mut self, rhs: TensorView<'_, T, M>) {
                 self.view_mut().$method(rhs);
             }
@@ -196,6 +201,7 @@ macro_rules! impl_assign_ops {
             for Tensor<T, N>
         {
             #[inline]
+            #[track_caller]
             fn $method(&mut self, rhs: &Tensor<T, M>) {
                 self.$method(rhs.view());
             }
@@ -205,6 +211,7 @@ macro_rules! impl_assign_ops {
             for Tensor<T, N>
         {
             #[inline]
+            #[track_caller]
             fn $method(&mut self, rhs: &TensorView<'_, T, M>) {
                 self.$method(*rhs);
             }
@@ -214,6 +221,7 @@ macro_rules! impl_assign_ops {
             for Tensor<T, N>
         {
             #[inline]
+            #[track_caller]
             fn $method(&mut self, rhs: &TensorViewMut<'_, T, M>) {
                 self.$method(rhs.view());
             }
@@ -352,6 +360,7 @@ macro_rules! impl_owned_binary_ops {
             type Output = Tensor<T, N>;
 
             #[inline]
+            #[track_caller]
             fn $method(mut self, rhs: TensorView<'_, T, M>) -> Self::Output {
                 self $op rhs;
                 self
@@ -364,6 +373,7 @@ macro_rules! impl_owned_binary_ops {
             type Output = Tensor<T, N>;
 
             #[inline]
+            #[track_caller]
             fn $method(self, rhs: &Tensor<T, M>) -> Self::Output {
                 self.$method(rhs.view())
             }
@@ -375,6 +385,7 @@ macro_rules! impl_owned_binary_ops {
             type Output = Tensor<T, N>;
 
             #[inline]
+            #[track_caller]
             fn $method(self, rhs: &TensorView<'_, T, M>) -> Self::Output {
                 self.$method(*rhs)
             }
@@ -386,6 +397,7 @@ macro_rules! impl_owned_binary_ops {
             type Output = Tensor<T, N>;
 
             #[inline]
+            #[track_caller]
             fn $method(self, rhs: &TensorViewMut<'_, T, M>) -> Self::Output {
                 self.$method(rhs.view())
             }
@@ -408,6 +420,7 @@ macro_rules! impl_owned_binary_ops {
             type Output = Tensor<T, N>;
 
             #[inline]
+            #[track_caller]
             fn $method(self, mut rhs: Tensor<T, N>) -> Self::Output {
                 const {
                     assert!(
@@ -437,6 +450,7 @@ macro_rules! impl_owned_binary_ops {
             type Output = Tensor<T, N>;
 
             #[inline]
+            #[track_caller]
             fn $method(self, rhs: Tensor<T, N>) -> Self::Output {
                 self.view().$method(rhs)
             }
@@ -448,6 +462,7 @@ macro_rules! impl_owned_binary_ops {
             type Output = Tensor<T, N>;
 
             #[inline]
+            #[track_caller]
             fn $method(self, rhs: Tensor<T, N>) -> Self::Output {
                 (*self).$method(rhs)
             }
@@ -459,6 +474,7 @@ macro_rules! impl_owned_binary_ops {
             type Output = Tensor<T, N>;
 
             #[inline]
+            #[track_caller]
             fn $method(self, rhs: Tensor<T, N>) -> Self::Output {
                 self.view().$method(rhs)
             }

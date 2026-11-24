@@ -61,6 +61,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     /// overflows `usize`, or if `data.len()` does not equal the product of
     /// `shape`.
     #[inline]
+    #[track_caller]
     pub fn from_slice(data: &'a mut [T], shape: [usize; N]) -> Self {
         validate_shape(data.len(), &shape);
         Self::new(shape, data)
@@ -179,6 +180,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     /// Panics at compile time if `M > N`, or at runtime if `src.shape()` does
     /// not match `&self.shape()[N - M..]`.
     #[inline]
+    #[track_caller]
     pub fn assign<const M: usize>(&mut self, src: TensorView<'_, T, M>)
     where
         T: Copy,
@@ -205,6 +207,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     /// Panics if any dimension in `new_shape` is zero, if its product overflows
     /// `usize`, or if the element count differs from `self.len()`.
     #[inline]
+    #[track_caller]
     pub fn reshape<const M: usize>(self, new_shape: [usize; M]) -> TensorViewMut<'a, T, M> {
         validate_shape(self.len(), &new_shape);
         // SAFETY: `validate_shape` verified that `new_shape` has non-zero dimensions
@@ -228,6 +231,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     /// Panics at compile time if `N == 0`, or at runtime if `range` resolves
     /// to an empty range or exceeds `self.shape()[0]`.
     #[inline]
+    #[track_caller]
     pub fn slice<R: RangeBounds<usize>>(self, range: R) -> Self {
         const {
             assert!(N >= 1, "cannot slice a 0D scalar tensor");
@@ -261,6 +265,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     /// or `position >= self.shape()[0]` (since zero-sized dimensions are
     /// disallowed).
     #[inline]
+    #[track_caller]
     pub fn split_at(self, position: usize) -> (Self, Self) {
         const {
             assert!(N >= 1, "cannot split a 0D scalar tensor");
@@ -295,6 +300,7 @@ impl<'a, T, const N: usize> TensorViewMut<'a, T, N> {
     ///
     /// Panics at compile time if `M > N`.
     #[inline]
+    #[track_caller]
     pub fn chunks<const M: usize>(self) -> ChunksMut<'a, T, M> {
         const {
             assert!(M <= N, "chunk rank M cannot exceed tensor rank N");
@@ -353,6 +359,7 @@ impl<T, const N: usize> Index<[usize; N]> for TensorViewMut<'_, T, N> {
     type Output = T;
 
     #[inline]
+    #[track_caller]
     fn index(&self, index: [usize; N]) -> &Self::Output {
         let off = linear_offset(&self.shape, &index);
         // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`,
@@ -365,6 +372,7 @@ impl<T, const N: usize> Index<[usize; N]> for TensorViewMut<'_, T, N> {
 
 impl<T, const N: usize> IndexMut<[usize; N]> for TensorViewMut<'_, T, N> {
     #[inline]
+    #[track_caller]
     fn index_mut(&mut self, index: [usize; N]) -> &mut Self::Output {
         let off = linear_offset(&self.shape, &index);
         // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`,

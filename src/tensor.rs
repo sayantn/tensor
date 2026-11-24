@@ -32,6 +32,7 @@ impl<T, const N: usize> Tensor<T, N> {
     /// overflows `usize`, or if `data.len()` does not equal the product of
     /// `shape`.
     #[inline]
+    #[track_caller]
     pub fn from_vec(data: Vec<T>, shape: [usize; N]) -> Self {
         validate_shape(data.len(), &shape);
         Self {
@@ -49,6 +50,7 @@ impl<T, const N: usize> Tensor<T, N> {
     /// overflows `usize`, or if `data.len()` does not equal the product of
     /// `shape`.
     #[inline]
+    #[track_caller]
     pub fn from_boxed_slice(data: Box<[T]>, shape: [usize; N]) -> Self {
         validate_shape(data.len(), &shape);
         Self { shape, data }
@@ -61,6 +63,7 @@ impl<T, const N: usize> Tensor<T, N> {
     /// Panics if any dimension in `shape` is zero or if its product overflows
     /// `usize`.
     #[inline]
+    #[track_caller]
     pub fn from_elem(val: T, shape: [usize; N]) -> Self
     where
         T: Clone,
@@ -75,6 +78,7 @@ impl<T, const N: usize> Tensor<T, N> {
     /// Panics if any dimension in `shape` is zero or if its product overflows
     /// `usize`.
     #[inline]
+    #[track_caller]
     pub fn zeros(shape: [usize; N]) -> Self
     where
         T: Default + Clone,
@@ -180,6 +184,7 @@ impl<T, const N: usize> Tensor<T, N> {
     /// Panics at compile time if `M > N`, or at runtime if `src.shape()` does
     /// not match `&self.shape()[N - M..]`.
     #[inline]
+    #[track_caller]
     pub fn assign<const M: usize>(&mut self, src: TensorView<'_, T, M>)
     where
         T: Copy,
@@ -195,6 +200,7 @@ impl<T, const N: usize> Tensor<T, N> {
     /// Panics if any dimension in `new_shape` is zero, if its product overflows
     /// `usize`, or if the element count differs from `self.len()`.
     #[inline]
+    #[track_caller]
     pub fn reshape<const M: usize>(self, new_shape: [usize; M]) -> Tensor<T, M> {
         validate_shape(self.len(), &new_shape);
         Tensor {
@@ -240,6 +246,7 @@ impl<T, const N: usize> Index<[usize; N]> for Tensor<T, N> {
     type Output = T;
 
     #[inline]
+    #[track_caller]
     fn index(&self, index: [usize; N]) -> &Self::Output {
         let off = linear_offset(&self.shape, &index);
         // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`.
@@ -249,6 +256,7 @@ impl<T, const N: usize> Index<[usize; N]> for Tensor<T, N> {
 
 impl<T, const N: usize> IndexMut<[usize; N]> for Tensor<T, N> {
     #[inline]
+    #[track_caller]
     fn index_mut(&mut self, index: [usize; N]) -> &mut Self::Output {
         let off = linear_offset(&self.shape, &index);
         // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`.

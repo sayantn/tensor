@@ -2,16 +2,22 @@
 //! and pluggable Level-1/2/3 linear algebra backends.
 //!
 //! # Core Types
-//! - [`Tensor<T, N>`]: Heap-allocated (`alloc::boxed::Box<[T]>`) row-major
-//!   owned tensor of rank `N`.
+#![cfg_attr(
+    feature = "alloc",
+    doc = "- [`Tensor<T, N>`]: Heap-allocated (`alloc::boxed::Box<[T]>`) row-major\n  owned tensor of rank `N`."
+)]
 //! - [`TensorView<'a, T, N>`]: Immutable, `Copy`, zero-allocation borrow over a
 //!   contiguous row-major slice.
 //! - [`TensorViewMut<'a, T, N>`]: Exclusive mutable borrow over a contiguous
 //!   row-major slice.
 //!
-//! Convenience rank aliases are provided for rank-0 ([`Scalar`]), rank-1
-//! ([`Vector`]), and rank-2 ([`Matrix`]) tensors and their view variants.
-
+//! Convenience rank aliases are provided for rank-0 ([`ScalarView`],
+//! [`ScalarViewMut`]), rank-1 ([`VectorView`], [`VectorViewMut`]), and rank-2
+//! ([`MatrixView`], [`MatrixViewMut`]) views
+#![cfg_attr(
+    feature = "alloc",
+    doc = "as well as their owned counterparts ([`Scalar`], [`Vector`], and [`Matrix`])."
+)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![no_std]
 #![warn(
@@ -35,6 +41,7 @@
     clippy::needless_pass_by_value
 )]
 
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 use core::fmt::{self, Display, Formatter};
@@ -45,10 +52,12 @@ use core::ops::{
     Sub, SubAssign,
 };
 
+#[cfg(feature = "alloc")]
 mod tensor;
 mod view;
 mod view_mut;
 
+#[cfg(feature = "alloc")]
 pub use tensor::*;
 pub use view::*;
 pub use view_mut::*;
@@ -150,6 +159,7 @@ macro_rules! impl_assign_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&Tensor<T, M>>
             for TensorViewMut<'_, T, N>
         {
@@ -187,6 +197,7 @@ macro_rules! impl_assign_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<TensorView<'_, T, M>>
             for Tensor<T, N>
         {
@@ -197,6 +208,7 @@ macro_rules! impl_assign_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&Tensor<T, M>>
             for Tensor<T, N>
         {
@@ -207,6 +219,7 @@ macro_rules! impl_assign_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&TensorView<'_, T, M>>
             for Tensor<T, N>
         {
@@ -217,6 +230,7 @@ macro_rules! impl_assign_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<&TensorViewMut<'_, T, M>>
             for Tensor<T, N>
         {
@@ -227,6 +241,7 @@ macro_rules! impl_assign_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $trait<T>, const N: usize> $trait<T> for Tensor<T, N> {
             #[inline]
             fn $method(&mut self, rhs: T) {
@@ -353,6 +368,7 @@ impl_binary_into_ops!(
 
 macro_rules! impl_owned_binary_ops {
     ($trait:ident, $method:ident, $assign_trait:ident, $op:tt) => {
+        #[cfg(feature = "alloc")]
         // Tensor<T, N> + RHS (reuses `self` buffer in place; supports broadcasting M <= N)
         impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
             $trait<TensorView<'_, T, M>> for Tensor<T, N>
@@ -367,6 +383,7 @@ macro_rules! impl_owned_binary_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
             $trait<&Tensor<T, M>> for Tensor<T, N>
         {
@@ -379,6 +396,7 @@ macro_rules! impl_owned_binary_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
             $trait<&TensorView<'_, T, M>> for Tensor<T, N>
         {
@@ -391,6 +409,7 @@ macro_rules! impl_owned_binary_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
             $trait<&TensorViewMut<'_, T, M>> for Tensor<T, N>
         {
@@ -403,6 +422,7 @@ macro_rules! impl_owned_binary_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $assign_trait<T>, const N: usize> $trait<T> for Tensor<T, N> {
             type Output = Tensor<T, N>;
 
@@ -413,6 +433,7 @@ macro_rules! impl_owned_binary_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         // Borrowed LHS (rank M <= N) + owned Tensor<T, N> (reuses `rhs` buffer in place!)
         impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
             $trait<Tensor<T, N>> for TensorView<'_, T, M>
@@ -444,6 +465,7 @@ macro_rules! impl_owned_binary_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
             $trait<Tensor<T, N>> for &Tensor<T, M>
         {
@@ -456,6 +478,7 @@ macro_rules! impl_owned_binary_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
             $trait<Tensor<T, N>> for &TensorView<'_, T, M>
         {
@@ -468,6 +491,7 @@ macro_rules! impl_owned_binary_ops {
             }
         }
 
+        #[cfg(feature = "alloc")]
         impl<T: Copy + $trait<T, Output = T>, const N: usize, const M: usize>
             $trait<Tensor<T, N>> for &TensorViewMut<'_, T, M>
         {
@@ -496,6 +520,7 @@ impl_owned_binary_ops!(Shr, shr, ShrAssign, >>=);
 macro_rules! impl_scalar_lhs_ops {
     ($trait:ident, $method:ident => $($ty:ty),+ $(,)?) => {
         $(
+            #[cfg(feature = "alloc")]
             impl<const N: usize> $trait<Tensor<$ty, N>> for $ty {
                 type Output = Tensor<$ty, N>;
 
@@ -524,6 +549,7 @@ impl_scalar_lhs_ops!(Shr, shr => i8, i16, i32, i64, i128, isize, u8, u16, u32, u
 
 macro_rules! impl_owned_unary_ops {
     ($trait:ident, $method:ident, $op:tt) => {
+        #[cfg(feature = "alloc")]
         impl<T: Copy + core::ops::$trait<Output = T>, const N: usize> core::ops::$trait
             for Tensor<T, N>
         {
@@ -532,7 +558,7 @@ macro_rules! impl_owned_unary_ops {
             #[inline]
             fn $method(mut self) -> Self::Output {
                 for x in self.as_mut_slice() {
-                    *x = $op * x;
+                    *x = $op(*x);
                 }
                 self
             }
@@ -587,6 +613,7 @@ fn fmt_nd<T: Display>(
 // Aliases & Rank-Specific Helpers
 // ============================================================================
 
+#[cfg(feature = "alloc")]
 /// Owned 0-dimensional scalar tensor.
 pub type Scalar<T> = Tensor<T, 0>;
 /// Immutable 0-dimensional scalar view.
@@ -594,6 +621,7 @@ pub type ScalarView<'a, T> = TensorView<'a, T, 0>;
 /// Mutable 0-dimensional scalar view.
 pub type ScalarViewMut<'a, T> = TensorViewMut<'a, T, 0>;
 
+#[cfg(feature = "alloc")]
 /// Owned 1-dimensional vector tensor.
 pub type Vector<T> = Tensor<T, 1>;
 /// Immutable 1-dimensional vector view.
@@ -601,6 +629,7 @@ pub type VectorView<'a, T> = TensorView<'a, T, 1>;
 /// Mutable 1-dimensional vector view.
 pub type VectorViewMut<'a, T> = TensorViewMut<'a, T, 1>;
 
+#[cfg(feature = "alloc")]
 /// Owned 2-dimensional matrix tensor.
 pub type Matrix<T> = Tensor<T, 2>;
 /// Immutable 2-dimensional matrix view.

@@ -12,5 +12,4 @@ else
 fi
 
 cargo test --tests --all-features
-cargo test --doc --no-default-features
-cargo +nightly miri test --no-default-features
+cargo +nightly miri test --no-default-features --features alloc

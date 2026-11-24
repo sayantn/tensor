@@ -7,9 +7,12 @@ use core::slice::Iter;
 use core::{array, fmt, slice};
 
 use crate::{
-    MatrixView, ScalarView, Tensor, TensorViewMut, VectorView, fmt_nd, linear_offset,
+    MatrixView, ScalarView, TensorViewMut, VectorView, fmt_nd, linear_offset,
     linear_offset_checked, resolve_range, unchecked_shape_len, validate_shape,
 };
+
+#[cfg(feature = "alloc")]
+use crate::Tensor;
 
 /// An immutable, zero-copy view over a contiguous row-major tensor of rank `N`.
 ///
@@ -236,6 +239,7 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     }
 
     /// Clones the elements of this view into an owned [`Tensor<T, N>`].
+    #[cfg(feature = "alloc")]
     #[inline]
     pub fn to_tensor(self) -> Tensor<T, N>
     where
@@ -484,6 +488,7 @@ impl<T: PartialEq, const N: usize> PartialEq<TensorView<'_, T, N>> for TensorVie
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<T: PartialEq, const N: usize> PartialEq<TensorView<'_, T, N>> for Tensor<T, N> {
     #[inline]
     fn eq(&self, other: &TensorView<'_, T, N>) -> bool {

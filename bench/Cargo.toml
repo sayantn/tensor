@@ -6,7 +6,6 @@ publish     = false
 
 [features]
 matrixmultiply-constconf = ["tensor/matrixmultiply-constconf"]
-x86-v4                   = ["tensor/gemm-x86-v4"]
 wasm-simd128             = ["tensor/gemm-wasm-simd128"]
 apple-amx                = ["tensor/gemm-apple-amx"]
 

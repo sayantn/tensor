@@ -1,12 +1,15 @@
 #!/usr/bin/env sh
 set -eu
 
-for gemm in "" "backend-gemm" "gemm-f16"; do
-    for mm in "" "backend-matrixmultiply"; do
-        for blas in "" "backend-blas"; do
-            feats=$(printf "%s %s %s %s" "$gemm" "$mm" "$blas" | xargs)
-            echo "==> clippy --no-default-features --features \"$feats\""
-            cargo clippy --all-targets --no-default-features --features "$feats" -- -D warnings
+for std in "" "alloc" "std"; do
+    for gemm in "" "backend-gemm" "gemm-f16"; do
+        for mm in "" "backend-matrixmultiply"; do
+            for blas in "" "backend-blas"; do
+                feats=$(printf "%s %s %s %s" "$std" "$gemm" "$mm" "$blas" | xargs)
+                echo "==> clippy --no-default-features --features \"$feats\""
+                cargo clippy --all-targets --no-default-features --features "$feats" -- -D warnings
+                cargo doc --no-deps --no-default-features --features "$feats"
+            done
         done
     done
 done

@@ -8,7 +8,10 @@ autobenches = false
 members = [".", "bench"]
 
 [features]
-default = ["gemm-x86-v4"]
+default = ["backend-gemm", "std"]
+
+alloc = ["half?/alloc"]
+std   = ["alloc", "half?/std", "matrixmultiply?/std", "gemm?/std"]
 
 # Scalar support (enables `f16` in `gemm`) (implies `backend-gemm`)
 gemm-f16 = ["backend-gemm", "dep:half", "gemm/f16"]
@@ -23,20 +26,23 @@ matrixmultiply-constconf = [
     "backend-matrixmultiply",
     "matrixmultiply/constconf",
 ]
-gemm-x86-v4 = ["backend-gemm", "gemm/x86-v4"]
 gemm-wasm-simd128 = ["backend-gemm", "gemm/wasm-simd128-enable"]
 gemm-apple-amx = ["backend-gemm", "gemm/experimental-apple-amx"]
 
 [dependencies]
 num-traits = { version = "0.2.19", default-features = false }
 
-half = { version = "2.7.1", features = ["num-traits"], optional = true }
+half = { version = "2.7.1", default-features = false, features = [
+    "num-traits",
+], optional = true }
 
 cblas-sys = { version = "0.3.0", optional = true }
 gemm = { version = "0.19.0", default-features = false, features = [
-    "std",
+    "x86-v4",
 ], optional = true }
-matrixmultiply = { version = "0.3.11", optional = true }
+matrixmultiply = { version = "0.3.11", default-features = false, features = [
+    "avx512",
+], optional = true }
 
 [package.metadata.docs.rs]
 all-features = true

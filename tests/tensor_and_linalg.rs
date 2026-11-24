@@ -1,4 +1,5 @@
 #![allow(clippy::float_cmp, clippy::many_single_char_names)]
+#![cfg(feature = "alloc")]
 
 use tensor::linalg::{Cutoff, GemmBackend, MatrixOp, Naive, axpy, dot, gemv, ger, sum_axis};
 use tensor::{Matrix, Scalar, Tensor, TensorViewMut, Vector};

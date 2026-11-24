@@ -224,9 +224,9 @@ pub fn sum_axis<T: Element, const N: usize, const M: usize>(
     // SAFETY: `x.shape()` is a valid tensor shape (all dimensions non-zero and
     // total product fits in `usize`), so any sub-slice product is non-zero and
     // cannot overflow `usize`.
-    let outer = unsafe { unchecked_shape_len(&x.shape()[..axis]) };
+    let outer = unsafe { unchecked_shape_len(&x.shape_raw()[..axis]).get() };
     // SAFETY: Same invariant as above for the trailing sub-slice.
-    let inner = unsafe { unchecked_shape_len(&x.shape()[axis + 1..]) };
+    let inner = unsafe { unchecked_shape_len(&x.shape_raw()[axis + 1..]).get() };
     let axis_len = x.shape()[axis];
 
     let a3 = x.reshape([outer, axis_len, inner]);

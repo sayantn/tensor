@@ -1,35 +1,18 @@
-use core::fmt::{Display, Formatter};
+use core::fmt::{Debug, Display, Formatter};
 use core::iter::{FusedIterator, zip};
-use core::marker::PhantomData;
+use core::num::NonZeroUsize;
 use core::ops::{Index, RangeBounds};
 use core::ptr::NonNull;
 use core::slice::Iter;
-use core::{array, fmt, slice};
+use core::{fmt, slice};
 
 use crate::{
-    MatrixView, Monoid, ScalarView, TensorViewMut, VectorView, fmt_nd, linear_offset,
-    linear_offset_checked, resolve_range, unchecked_shape_len, validate_shape,
+    MatrixView, Monoid, ScalarView, TensorView, TensorViewMut, VectorView, fmt_nd, linear_offset,
+    linear_offset_checked, resolve_range, unchecked_shape_len, unpack_shape, validate_shape,
 };
 
 #[cfg(feature = "alloc")]
 use crate::Tensor;
-
-/// An immutable, zero-copy view over a contiguous row-major tensor of rank `N`.
-///
-/// `TensorView` implements [`Copy`] and [`Clone`] regardless of whether `T`
-/// implements them.
-#[must_use]
-#[derive(Debug, Eq)]
-pub struct TensorView<'a, T, const N: usize> {
-    shape: [usize; N],
-    ptr: NonNull<T>,
-    _marker: PhantomData<&'a T>,
-}
-
-// SAFETY: `TensorView<'a, T, N>` acts identically to `&'a [T]`.
-unsafe impl<T: Sync, const N: usize> Send for TensorView<'_, T, N> {}
-// SAFETY: `TensorView<'a, T, N>` provides only shared immutable access to `T`.
-unsafe impl<T: Sync, const N: usize> Sync for TensorView<'_, T, N> {}
 
 impl<T, const N: usize> Clone for TensorView<'_, T, N> {
     #[inline]
@@ -41,33 +24,6 @@ impl<T, const N: usize> Clone for TensorView<'_, T, N> {
 impl<T, const N: usize> Copy for TensorView<'_, T, N> {}
 
 impl<'a, T, const N: usize> TensorView<'a, T, N> {
-    #[inline]
-    pub(crate) const fn new(shape: [usize; N], data: &'a [T]) -> Self {
-        Self {
-            shape,
-            ptr: NonNull::from_ref(data).cast(),
-            _marker: PhantomData,
-        }
-    }
-
-    /// Creates a [`TensorView`] directly from a `shape` and non-null base pointer.
-    ///
-    /// # Safety
-    ///
-    /// - Every dimension in `shape` must be non-zero (`> 0`), and the product of
-    ///   `shape` must not overflow `usize`.
-    /// - `ptr` must be valid for reads of `shape.iter().product()` contiguous `T`
-    ///   elements for the entire lifetime `'a`, properly aligned, and point to
-    ///   initialized values of type `T`.
-    #[inline]
-    pub(crate) const unsafe fn from_raw_parts(shape: [usize; N], ptr: NonNull<T>) -> Self {
-        Self {
-            shape,
-            ptr,
-            _marker: PhantomData,
-        }
-    }
-
     /// Wraps an existing row-major slice in an immutable [`TensorView`].
     ///
     /// # Panics
@@ -77,16 +33,18 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     /// `shape`.
     #[inline]
     #[track_caller]
-    pub fn from_slice(data: &'a [T], shape: [usize; N]) -> Self {
-        validate_shape(data.len(), &shape);
-        Self::new(shape, data)
+    pub const fn from_slice(data: &'a [T], shape: [usize; N]) -> Self {
+        let shape = validate_shape(data.len(), shape);
+        // SAFETY: `validate_shape` verified `shape` matches `data.len()` without overflow,
+        // and `data` is valid for reads for lifetime `'a`.
+        unsafe { Self::from_raw_parts(shape, NonNull::from_ref(data).cast()) }
     }
 
     /// Returns the dimensions of the tensor view.
     #[inline]
     #[must_use]
     pub const fn shape(&self) -> [usize; N] {
-        self.shape
+        unpack_shape(self.shape_raw())
     }
 
     /// Returns the total number of elements in the tensor view.
@@ -95,7 +53,7 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     pub const fn len(&self) -> usize {
         // SAFETY: Any valid `TensorView` validates at construction that the product
         // of `self.shape` does not overflow `usize`.
-        unsafe { unchecked_shape_len(&self.shape) }
+        unsafe { unchecked_shape_len(&self.shape_raw()).get() }
     }
 
     /// Returns the underlying row-major data as a flat slice.
@@ -111,7 +69,7 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     #[inline]
     #[must_use]
     pub const fn as_ptr(&self) -> *const T {
-        self.ptr.as_ptr()
+        self.ptr().as_ptr()
     }
 
     /// Returns an iterator over all elements in row-major order.
@@ -129,18 +87,20 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     /// `usize`, or if the element count differs from `self.len()`.
     #[inline]
     #[track_caller]
-    pub fn reshape<const M: usize>(self, new_shape: [usize; M]) -> TensorView<'a, T, M> {
-        validate_shape(self.len(), &new_shape);
+    pub const fn reshape<const M: usize>(self, new_shape: [usize; M]) -> TensorView<'a, T, M> {
         // SAFETY: `validate_shape` verified that `new_shape` has non-zero dimensions
         // and the exact same element count as `self.len()`, so `self.ptr` covers it.
-        unsafe { TensorView::from_raw_parts(new_shape, self.ptr) }
+        unsafe { TensorView::from_raw_parts(validate_shape(self.len(), new_shape), self.ptr()) }
     }
 
     /// Flattens the view into a 1D [`VectorView`] of length `self.len()`.
     #[inline]
     pub const fn flatten(self) -> VectorView<'a, T> {
-        // SAFETY: `self.len()` is non-zero and matches the element span of `self.ptr`.
-        unsafe { TensorView::from_raw_parts([self.len()], self.ptr) }
+        // SAFETY: Any valid `TensorView` validates at construction that the product
+        // of `self.shape` does not overflow `usize`.
+        let len = unsafe { unchecked_shape_len(&self.shape_raw()) };
+        // SAFETY: `len` is non-zero and matches the element span of `self.ptr`.
+        unsafe { TensorView::from_raw_parts([len], self.ptr()) }
     }
 
     /// Slices the outermost axis (`axis 0`) by `range`, returning a sub-view
@@ -156,19 +116,22 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
         const {
             assert!(N >= 1, "cannot slice a 0D scalar tensor");
         }
-        let r = resolve_range(range, self.shape[0]);
+
+        let shape = self.shape_raw();
+
+        let (start, len) = resolve_range(range, shape[0]);
         // SAFETY: `self.shape[1..]` is a subslice of `self.shape`, whose product fits in `usize`.
-        let inner = unsafe { unchecked_shape_len(&self.shape[1..]) };
+        let inner = unsafe { unchecked_shape_len(&shape[1..]) };
 
-        let mut new_shape = self.shape;
-        new_shape[0] = r.end - r.start;
+        let mut new_shape = shape;
+        new_shape[0] = len;
 
-        // SAFETY: `r.start < r.end <= self.shape[0]`, so `r.start * inner` is strictly
+        // SAFETY: `start + len <= self.shape[0]`, so `start * inner` is strictly
         // within the `self.shape[0] * inner` allocation of `self.ptr`.
-        let ptr = unsafe { self.ptr.add(r.start * inner) };
+        let ptr = unsafe { self.ptr().add(start * inner.get()) };
 
-        // SAFETY: `new_shape[0] = r.end - r.start > 0`, and `(r.end - r.start) * inner`
-        // elements starting at `ptr` lie strictly within `self`.
+        // SAFETY: `len` is non-zero and `len * inner` elements starting at `ptr`
+        // lie strictly within `self`.
         unsafe { TensorView::from_raw_parts(new_shape, ptr) }
     }
 
@@ -185,28 +148,41 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     /// disallowed).
     #[inline]
     #[track_caller]
-    pub fn split_at(self, position: usize) -> (Self, Self) {
+    pub const fn split_at(self, position: usize) -> (Self, Self) {
         const {
             assert!(N >= 1, "cannot split a 0D scalar tensor");
         }
-        assert!(position > 0 && position < self.shape[0]);
 
-        let mut shape1 = self.shape;
-        shape1[0] = position;
+        let shape = self.shape_raw();
 
-        let mut shape2 = self.shape;
-        shape2[0] -= position;
+        let Some((&axis0, rest)) = shape.split_first() else {
+            unreachable!();
+        };
+        let Some(first_len) = NonZeroUsize::new(position) else {
+            panic!("split position must be non-zero");
+        };
+        let Some(rem) = axis0.get().checked_sub(position) else {
+            panic!("split position out of bounds");
+        };
+        let Some(second_len) = NonZeroUsize::new(rem) else {
+            panic!("split position must be less than axis len");
+        };
 
-        // SAFETY: `self.shape[1..]` is a subslice of `self.shape`, whose product fits in `usize`.
-        let inner = unsafe { unchecked_shape_len(&self.shape[1..]) };
+        let mut shape1 = shape;
+        shape1[0] = first_len;
 
-        // SAFETY: `position < self.shape[0]`, so `position * inner` is within `self`.
-        let ptr2 = unsafe { self.ptr.add(position * inner) };
+        let mut shape2 = shape;
+        shape2[0] = second_len;
 
-        // SAFETY: Both `position > 0` and `self.shape[0] - position > 0`, and the two
-        // sub-ranges partition `self.len()` elements without exceeding `self`.
-        let first = unsafe { Self::from_raw_parts(shape1, self.ptr) };
-        // SAFETY: See above; `ptr2` points to the remaining `(shape[0] - position) * inner` elements.
+        // SAFETY: `rest` is a subslice of `self.shape`, whose product fits in `usize`.
+        let inner = unsafe { unchecked_shape_len(rest).get() };
+
+        // SAFETY: `position < axis0`, so `position * inner` is within `self`.
+        let ptr2 = unsafe { self.ptr().add(position * inner) };
+
+        // SAFETY: `first_len` and `second_len` are non-zero and partition `axis0`.
+        let first = unsafe { Self::from_raw_parts(shape1, self.ptr()) };
+        // SAFETY: `ptr2` points to the remaining `second_len * inner` elements.
         let second = unsafe { Self::from_raw_parts(shape2, ptr2) };
 
         (first, second)
@@ -224,7 +200,8 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
         const {
             assert!(M <= N, "chunk rank M cannot exceed tensor rank N");
         }
-        let shape = array::from_fn(|i| self.shape[N - M + i]);
+        let shape = *self.shape_raw().last_chunk().unwrap();
+
         let inner = if M == 0 {
             ChunksInner::Scalar(self.as_slice().iter())
         } else if M == N {
@@ -233,7 +210,7 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
             // SAFETY: `shape` consists of the trailing `M` dimensions of `self.shape`,
             // so its product cannot overflow `usize` and is non-zero.
             let chunk_len = unsafe { unchecked_shape_len(&shape) };
-            ChunksInner::Multi(self.as_slice().chunks_exact(chunk_len))
+            ChunksInner::Multi(self.as_slice().chunks_exact(chunk_len.get()))
         };
         Chunks { inner, shape }
     }
@@ -245,18 +222,26 @@ impl<'a, T, const N: usize> TensorView<'a, T, N> {
     where
         T: Clone,
     {
-        Tensor::from_vec(self.as_slice().to_vec(), self.shape)
+        // SAFETY: `self.shape` is valid and the cloned boxed slice has length `self.len()`.
+        unsafe {
+            Tensor::from_raw_parts(
+                self.shape_raw(),
+                self.as_slice().to_vec().into_boxed_slice(),
+            )
+        }
     }
 
     /// Returns a reference to the element at `index`, or `None` if any
     /// coordinate is out of bounds.
     #[inline]
     #[must_use]
-    pub fn get(self, index: [usize; N]) -> Option<&'a T> {
-        let off = linear_offset_checked(&self.shape, &index)?;
+    pub const fn get(self, index: [usize; N]) -> Option<&'a T> {
+        let Some(off) = linear_offset_checked(&self.shape_raw(), &index) else {
+            return None;
+        };
         // SAFETY: `linear_offset_checked` bounds-checks every coordinate against `self.shape`,
         // so `off < self.len()` and `ptr` stays within the valid read span.
-        let ptr = unsafe { self.ptr.add(off) };
+        let ptr = unsafe { self.ptr().add(off) };
         // SAFETY: `ptr` points to a valid, initialized `T` for lifetime `'a`.
         Some(unsafe { ptr.as_ref() })
     }
@@ -344,10 +329,10 @@ impl<T, const N: usize> Index<[usize; N]> for TensorView<'_, T, N> {
     #[inline]
     #[track_caller]
     fn index(&self, index: [usize; N]) -> &Self::Output {
-        let off = linear_offset(&self.shape, &index);
+        let off = linear_offset(&self.shape_raw(), &index);
         // SAFETY: `linear_offset` bounds-checks every coordinate against `self.shape`,
         // so `off < self.len()` and `ptr` stays within the valid read span.
-        let ptr = unsafe { self.ptr.add(off) };
+        let ptr = unsafe { self.ptr().add(off) };
         // SAFETY: `ptr` points to a valid, initialized `T` for lifetime `'a`.
         unsafe { ptr.as_ref() }
     }
@@ -376,7 +361,7 @@ impl<'a, T, const N: usize> IntoIterator for &TensorView<'a, T, N> {
 impl<T: Display, const N: usize> Display for TensorView<'_, T, N> {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        fmt_nd(f, self.as_slice(), &self.shape, 0)
+        fmt_nd(f, self.as_slice(), &self.shape_raw(), 0)
     }
 }
 
@@ -384,7 +369,8 @@ impl<'a, T> ScalarView<'a, T> {
     /// Creates a 0-dimensional [`ScalarView`] borrowing a single reference.
     #[inline]
     pub const fn scalar(val: &'a T) -> Self {
-        Self::new([], slice::from_ref(val))
+        // SAFETY: Shape `[]` has product 1 and `val` points to 1 initialized `T` for `'a`.
+        unsafe { Self::from_raw_parts([], NonNull::from_ref(val)) }
     }
 
     /// Consumes the view and returns the underlying immutable scalar reference.
@@ -393,7 +379,7 @@ impl<'a, T> ScalarView<'a, T> {
     pub const fn into_scalar(self) -> &'a T {
         // SAFETY: A rank-0 `ScalarView` has shape `[]` (`len == 1`), so `self.ptr`
         // points to a valid, initialized `T` for lifetime `'a`.
-        unsafe { self.ptr.as_ref() }
+        unsafe { self.ptr().as_ref() }
     }
 }
 
@@ -402,10 +388,10 @@ impl<'a, T> VectorView<'a, T> {
     ///
     /// # Panics
     ///
-    /// Panics if `val` is empty
+    /// Panics if `val` is empty.
     #[inline]
     #[track_caller]
-    pub fn vector(val: &'a [T]) -> Self {
+    pub const fn vector(val: &'a [T]) -> Self {
         Self::from_slice(val, [val.len()])
     }
 }
@@ -415,14 +401,14 @@ impl<T> MatrixView<'_, T> {
     #[inline]
     #[must_use]
     pub const fn nrows(&self) -> usize {
-        self.shape[0]
+        self.shape_raw()[0].get()
     }
 
     /// Returns the number of columns (`shape()[1]`) in the matrix view.
     #[inline]
     #[must_use]
     pub const fn ncols(&self) -> usize {
-        self.shape[1]
+        self.shape_raw()[1].get()
     }
 }
 
@@ -445,7 +431,7 @@ enum ChunksInner<'a, T> {
 #[derive(Debug, Clone)]
 pub struct Chunks<'a, T, const M: usize> {
     inner: ChunksInner<'a, T>,
-    shape: [usize; M],
+    shape: [NonZeroUsize; M],
 }
 
 impl<'a, T, const M: usize> Iterator for Chunks<'a, T, M> {
@@ -458,7 +444,8 @@ impl<'a, T, const M: usize> Iterator for Chunks<'a, T, M> {
             ChunksInner::Single(slot) => slot.take()?,
             ChunksInner::Multi(iter) => iter.next()?,
         };
-        Some(TensorView::new(self.shape, data))
+        // SAFETY: `data.len()` matches the product of `self.shape` by `Chunks` construction.
+        Some(unsafe { TensorView::from_raw_parts(self.shape, NonNull::from_ref(data).cast()) })
     }
 
     #[inline]
@@ -481,7 +468,8 @@ impl<'a, T, const M: usize> Iterator for Chunks<'a, T, M> {
             }
             ChunksInner::Multi(iter) => iter.nth(n)?,
         };
-        Some(TensorView::new(self.shape, data))
+        // SAFETY: `data.len()` matches the product of `self.shape` by `Chunks` construction.
+        Some(unsafe { TensorView::from_raw_parts(self.shape, NonNull::from_ref(data).cast()) })
     }
 
     #[inline]
@@ -492,13 +480,23 @@ impl<'a, T, const M: usize> Iterator for Chunks<'a, T, M> {
         let shape = self.shape;
         match self.inner {
             ChunksInner::Scalar(iter) => iter.fold(init, |acc, elem| {
-                f(acc, TensorView::new(shape, slice::from_ref(elem)))
+                // SAFETY: `shape` is `[]` (len 1) and `elem` is a valid `&'a T`.
+                let view = unsafe { TensorView::from_raw_parts(shape, NonNull::from_ref(elem)) };
+                f(acc, view)
             }),
-            ChunksInner::Single(Some(data)) => f(init, TensorView::new(shape, data)),
-            ChunksInner::Single(None) => init,
-            ChunksInner::Multi(iter) => {
-                iter.fold(init, |acc, data| f(acc, TensorView::new(shape, data)))
+            ChunksInner::Single(Some(data)) => {
+                // SAFETY: `data.len()` matches the product of `shape` by `Chunks` construction.
+                let view =
+                    unsafe { TensorView::from_raw_parts(shape, NonNull::from_ref(data).cast()) };
+                f(init, view)
             }
+            ChunksInner::Single(None) => init,
+            ChunksInner::Multi(iter) => iter.fold(init, |acc, data| {
+                // SAFETY: `data.len()` matches the product of `shape` by `Chunks` construction.
+                let view =
+                    unsafe { TensorView::from_raw_parts(shape, NonNull::from_ref(data).cast()) };
+                f(acc, view)
+            }),
         }
     }
 }
@@ -511,7 +509,8 @@ impl<T, const M: usize> DoubleEndedIterator for Chunks<'_, T, M> {
             ChunksInner::Single(slot) => slot.take()?,
             ChunksInner::Multi(iter) => iter.next_back()?,
         };
-        Some(TensorView::new(self.shape, data))
+        // SAFETY: `data.len()` matches the product of `self.shape` by `Chunks` construction.
+        Some(unsafe { TensorView::from_raw_parts(self.shape, NonNull::from_ref(data).cast()) })
     }
 
     #[inline]
@@ -528,7 +527,8 @@ impl<T, const M: usize> DoubleEndedIterator for Chunks<'_, T, M> {
             }
             ChunksInner::Multi(iter) => iter.nth_back(n)?,
         };
-        Some(TensorView::new(self.shape, data))
+        // SAFETY: `data.len()` matches the product of `self.shape` by `Chunks` construction.
+        Some(unsafe { TensorView::from_raw_parts(self.shape, NonNull::from_ref(data).cast()) })
     }
 
     #[inline]
@@ -539,13 +539,23 @@ impl<T, const M: usize> DoubleEndedIterator for Chunks<'_, T, M> {
         let shape = self.shape;
         match self.inner {
             ChunksInner::Scalar(iter) => iter.rfold(init, |acc, elem| {
-                f(acc, TensorView::new(shape, slice::from_ref(elem)))
+                // SAFETY: `shape` is `[]` (len 1) and `elem` is a valid `&'a T`.
+                let view = unsafe { TensorView::from_raw_parts(shape, NonNull::from_ref(elem)) };
+                f(acc, view)
             }),
-            ChunksInner::Single(Some(data)) => f(init, TensorView::new(shape, data)),
-            ChunksInner::Single(None) => init,
-            ChunksInner::Multi(iter) => {
-                iter.rfold(init, |acc, data| f(acc, TensorView::new(shape, data)))
+            ChunksInner::Single(Some(data)) => {
+                // SAFETY: `data.len()` matches the product of `shape` by `Chunks` construction.
+                let view =
+                    unsafe { TensorView::from_raw_parts(shape, NonNull::from_ref(data).cast()) };
+                f(init, view)
             }
+            ChunksInner::Single(None) => init,
+            ChunksInner::Multi(iter) => iter.rfold(init, |acc, data| {
+                // SAFETY: `data.len()` matches the product of `shape` by `Chunks` construction.
+                let view =
+                    unsafe { TensorView::from_raw_parts(shape, NonNull::from_ref(data).cast()) };
+                f(acc, view)
+            }),
         }
     }
 }
@@ -563,12 +573,24 @@ impl<T, const M: usize> ExactSizeIterator for Chunks<'_, T, M> {
 
 impl<T, const M: usize> FusedIterator for Chunks<'_, T, M> {}
 
+impl<T: Debug, const N: usize> Debug for TensorView<'_, T, N> {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TensorView")
+            .field("shape", &self.shape())
+            .field("data", &self.as_slice())
+            .finish()
+    }
+}
+
 impl<T: PartialEq, const N: usize> PartialEq<TensorView<'_, T, N>> for TensorView<'_, T, N> {
     #[inline]
     fn eq(&self, other: &TensorView<'_, T, N>) -> bool {
-        self.shape == other.shape && self.as_slice() == other.as_slice()
+        self.shape_raw() == other.shape_raw() && self.as_slice() == other.as_slice()
     }
 }
+
+impl<T: Eq, const N: usize> Eq for TensorView<'_, T, N> {}
 
 impl<T: PartialEq, const N: usize> PartialEq<TensorView<'_, T, N>> for TensorViewMut<'_, T, N> {
     #[inline]

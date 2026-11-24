@@ -21,19 +21,27 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![no_std]
 #![warn(
-    unsafe_op_in_unsafe_fn,
     missing_docs,
+    // implicit_provenance_casts,
+    missing_debug_implementations,
+    unreachable_pub,
     clippy::pedantic,
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block,
     clippy::as_ptr_cast_mut,
     clippy::float_cmp,
+    clippy::imprecise_flops,
     clippy::suboptimal_flops,
     clippy::missing_const_for_fn,
     clippy::missing_inline_in_public_items,
     clippy::dbg_macro,
     clippy::todo,
-    clippy::unimplemented
+    clippy::unimplemented,
+    clippy::std_instead_of_core,
+    clippy::alloc_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::unnecessary_safety_comment,
+    clippy::unnecessary_safety_doc,
 )]
 #![allow(
     clippy::len_without_is_empty,
@@ -46,7 +54,11 @@ extern crate alloc;
 
 use core::fmt::{self, Display, Formatter};
 use core::iter::zip;
-use core::ops::{AddAssign, Bound, DivAssign, MulAssign, Range, RangeBounds, SubAssign};
+use core::num::NonZeroUsize;
+use core::ops::{AddAssign, Bound, DivAssign, MulAssign, RangeBounds, SubAssign};
+
+mod inner;
+pub use inner::*;
 
 #[cfg(feature = "alloc")]
 mod tensor;
@@ -68,58 +80,92 @@ pub use reduce::*;
 // ============================================================================
 
 #[inline]
-const unsafe fn unchecked_shape_len(shape: &[usize]) -> usize {
+const fn unpack_shape<const N: usize>(shape: [NonZeroUsize; N]) -> [usize; N] {
+    let mut out = [0; N];
+    let mut i = 0;
+    while i < N {
+        out[i] = shape[i].get();
+        i += 1;
+    }
+    out
+}
+
+#[inline]
+const unsafe fn unchecked_shape_len(shape: &[NonZeroUsize]) -> NonZeroUsize {
     let mut prod = 1usize;
     let mut i = 0;
     while i < shape.len() {
         // SAFETY: Caller guarantees the product of `shape` does not overflow `usize`.
-        prod = unsafe { prod.unchecked_mul(shape[i]) };
+        prod = unsafe { prod.unchecked_mul(shape[i].get()) };
         i += 1;
     }
-    prod
+    // SAFETY: Every element in `shape` is non-zero and the product did not overflow `usize`.
+    unsafe { NonZeroUsize::new_unchecked(prod) }
 }
 
 #[inline]
 #[track_caller]
-fn shape_len(shape: &[usize]) -> usize {
-    shape
-        .iter()
-        .fold(1, |acc, &x| acc.checked_mul(x).expect("shape overflow"))
+const fn check_shape<const N: usize>(shape: [usize; N]) -> ([NonZeroUsize; N], usize) {
+    let mut out = [NonZeroUsize::MIN; N];
+    let mut prod = 1usize;
+    let mut i = 0;
+    while i < N {
+        let Some(dim) = NonZeroUsize::new(shape[i]) else {
+            panic!("tensor dimensions must be non-zero");
+        };
+        let Some(next) = prod.checked_mul(dim.get()) else {
+            panic!("shape overflow");
+        };
+        out[i] = dim;
+        prod = next;
+        i += 1;
+    }
+    (out, prod)
 }
 
 #[inline]
 #[track_caller]
-fn validate_shape(buffer_len: usize, shape: &[usize]) {
-    assert!(
-        !shape.contains(&0),
-        "tensor dimensions must be non-zero, got {shape:?}",
-    );
-    assert_eq!(
-        buffer_len,
-        shape_len(shape),
-        "buffer len ({buffer_len}) does not match shape {shape:?}",
-    );
+const fn validate_shape<const N: usize>(buffer_len: usize, shape: [usize; N]) -> [NonZeroUsize; N] {
+    let (out, prod) = check_shape(shape);
+    assert!(buffer_len == prod, "buffer len does not match shape");
+    out
 }
 
 #[inline]
 #[track_caller]
-fn linear_offset<const N: usize>(shape: &[usize; N], index: &[usize; N]) -> usize {
+fn linear_offset<const N: usize>(shape: &[NonZeroUsize; N], index: &[usize; N]) -> usize {
     zip(shape, index).fold(0, |offset, (&len, &idx)| {
-        assert!(idx < len, "index {idx} out of bounds for axis len {len}");
-        offset * len + idx
+        assert!(
+            idx < len.get(),
+            "index {idx} out of bounds for axis len {len}"
+        );
+        offset * len.get() + idx
     })
 }
 
 #[inline]
-fn linear_offset_checked<const N: usize>(shape: &[usize; N], index: &[usize; N]) -> Option<usize> {
-    zip(shape, index).try_fold(0, |offset, (&len, &idx)| {
-        (idx < len).then_some(offset * len + idx)
-    })
+const fn linear_offset_checked<const N: usize>(
+    shape: &[NonZeroUsize; N],
+    index: &[usize; N],
+) -> Option<usize> {
+    let mut offset = 0;
+    let mut i = 0;
+    while i < N {
+        let len = shape[i].get();
+        let idx = index[i];
+        if idx >= len {
+            return None;
+        }
+        offset = offset * len + idx;
+        i += 1;
+    }
+    Some(offset)
 }
 
 #[inline]
 #[track_caller]
-fn resolve_range<R: RangeBounds<usize>>(range: R, axis_len: usize) -> Range<usize> {
+fn resolve_range<R: RangeBounds<usize>>(range: R, axis_len: NonZeroUsize) -> (usize, NonZeroUsize) {
+    let axis_len = axis_len.get();
     let start = match range.start_bound() {
         Bound::Included(&s) => s,
         Bound::Excluded(&s) => s.checked_add(1).expect("range start overflow"),
@@ -130,17 +176,20 @@ fn resolve_range<R: RangeBounds<usize>>(range: R, axis_len: usize) -> Range<usiz
         Bound::Excluded(&e) => e,
         Bound::Unbounded => axis_len,
     };
-    assert!(start < end, "slice range {start}..{end} must be non-empty");
     assert!(
         end <= axis_len,
         "slice end {end} exceeds axis len {axis_len}"
     );
-    start..end
+    let len = end
+        .checked_sub(start)
+        .and_then(NonZeroUsize::new)
+        .unwrap_or_else(|| panic!("slice range {start}..{end} must be non-empty"));
+    (start, len)
 }
 
 macro_rules! impl_assign_ops {
-    ($trait:ident, $method:ident, $op:tt) => {
-        impl<T: Copy + $trait<T>, const N: usize, const M: usize> $trait<TensorView<'_, T, M>>
+    ($trait:ident, $method:ident,$op:tt) => {
+        impl<T: Copy + $trait<T>, const N: usize, const M: usize>$trait<TensorView<'_, T, M>>
             for TensorViewMut<'_, T, N>
         {
             #[inline]
@@ -162,7 +211,7 @@ macro_rules! impl_assign_ops {
             }
         }
 
-        impl<T: Copy + $trait<T>, const N: usize> $trait<T> for TensorViewMut<'_, T, N> {
+        impl<T: Copy + $trait<T>, const N: usize>$trait<T> for TensorViewMut<'_, T, N> {
             #[inline]
             fn $method(&mut self, rhs: T) {
                 self.$method(ScalarView::scalar(&rhs))
@@ -177,7 +226,7 @@ impl_assign_ops!(MulAssign, mul_assign, *=);
 impl_assign_ops!(DivAssign, div_assign, /=);
 
 macro_rules! impl_owned_binary_ops {
-    ($trait:ident, $method:ident, $assign_trait:ident, $assign_method:ident) => {
+    ($trait:ident,$method:ident, $assign_trait:ident,$assign_method:ident) => {
         #[cfg(feature = "alloc")]
         // Tensor<T, N> + RHS (reuses `self` buffer in place; supports broadcasting M <= N)
         impl<T: Copy + $assign_trait<T>, const N: usize, const M: usize>
@@ -262,14 +311,14 @@ impl<T: Copy + core::ops::Neg<Output = T>, const N: usize> core::ops::Neg for Te
 fn fmt_nd<T: Display>(
     f: &mut Formatter<'_>,
     data: &[T],
-    shape: &[usize],
+    shape: &[NonZeroUsize],
     depth: usize,
 ) -> fmt::Result {
     match shape {
         [] => Display::fmt(&data[0], f),
         [len] => {
             write!(f, "[")?;
-            for (i, x) in data[..*len].iter().enumerate() {
+            for (i, x) in data[..len.get()].iter().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
@@ -278,9 +327,10 @@ fn fmt_nd<T: Display>(
             write!(f, "]")
         }
         [outer, rest @ ..] => {
-            let chunk = shape_len(rest);
+            // SAFETY: `shape` comes from a valid tensor, so any sub-slice product fits in `usize`.
+            let chunk = unsafe { unchecked_shape_len(rest).get() };
             write!(f, "[")?;
-            for i in 0..*outer {
+            for i in 0..outer.get() {
                 if i > 0 {
                     writeln!(f, ",")?;
                     for _ in 0..=depth {

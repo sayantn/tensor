@@ -1,21 +1,14 @@
-use core::fmt;
-use core::fmt::{Display, Formatter};
+use core::fmt::{self, Display, Formatter};
+use core::num::NonZeroUsize;
+use core::ptr::NonNull;
 
 use alloc::boxed::Box;
 use alloc::{vec, vec::Vec};
 
-use crate::{Matrix, Scalar, TensorView, TensorViewMut, Vector, shape_len, validate_shape};
-
-/// An owned, heap-allocated, row-major dense tensor of rank `N`.
-///
-/// All dimensions must be strictly non-zero (`> 0`). Rank-0 scalars are
-/// represented as `Tensor<T, 0>` with shape `[]` and a single element.
-#[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Tensor<T, const N: usize> {
-    shape: [usize; N],
-    data: Box<[T]>,
-}
+use crate::{
+    Matrix, Scalar, Tensor, TensorView, TensorViewMut, Vector, check_shape, unpack_shape,
+    validate_shape,
+};
 
 impl<T, const N: usize> Tensor<T, N> {
     /// Constructs an owned [`Tensor`] from a flat row-major [`Vec`] and
@@ -29,11 +22,9 @@ impl<T, const N: usize> Tensor<T, N> {
     #[inline]
     #[track_caller]
     pub fn from_vec(data: Vec<T>, shape: [usize; N]) -> Self {
-        validate_shape(data.len(), &shape);
-        Self {
-            data: data.into_boxed_slice(),
-            shape,
-        }
+        let shape = validate_shape(data.len(), shape);
+        // SAFETY: `validate_shape` verified `shape` does not overflow and matches `data.len()`.
+        unsafe { Self::from_raw_parts(shape, data.into_boxed_slice()) }
     }
 
     /// Constructs an owned [`Tensor`] from a flat row-major [`Box<[T]>`](Box) and
@@ -47,8 +38,9 @@ impl<T, const N: usize> Tensor<T, N> {
     #[inline]
     #[track_caller]
     pub fn from_boxed_slice(data: Box<[T]>, shape: [usize; N]) -> Self {
-        validate_shape(data.len(), &shape);
-        Self { shape, data }
+        let shape = validate_shape(data.len(), shape);
+        // SAFETY: `validate_shape` verified `shape` does not overflow and matches `data.len()`.
+        unsafe { Self::from_raw_parts(shape, data) }
     }
 
     /// Allocates a [`Tensor`] of `shape` filled with clones of `val`.
@@ -63,7 +55,9 @@ impl<T, const N: usize> Tensor<T, N> {
     where
         T: Clone,
     {
-        Self::from_vec(vec![val; shape_len(&shape)], shape)
+        let (shape, len) = check_shape(shape);
+        // SAFETY: `check_shape` verified `shape` does not overflow and has product `len`.
+        unsafe { Self::from_raw_parts(shape, vec![val; len].into_boxed_slice()) }
     }
 
     /// Allocates a [`Tensor`] of `shape` filled with `T::default()`.
@@ -85,68 +79,77 @@ impl<T, const N: usize> Tensor<T, N> {
     #[inline]
     #[must_use]
     pub fn into_vec(self) -> Vec<T> {
-        self.data.into_vec()
+        self.into_data().into_vec()
     }
 
     /// Consumes the tensor and returns its underlying flat [`Box<[T]>`](Box).
     #[inline]
     #[must_use]
     pub fn into_boxed_slice(self) -> Box<[T]> {
-        self.data
+        self.into_data()
     }
 
     /// Returns the dimensions of the tensor.
     #[inline]
     #[must_use]
     pub const fn shape(&self) -> [usize; N] {
-        self.shape
+        unpack_shape(self.shape_raw())
     }
 
     /// Returns the total number of elements in the tensor.
     #[inline]
     #[must_use]
     pub const fn len(&self) -> usize {
-        self.data.len()
+        self.data().len()
     }
 
     /// Returns the underlying row-major data as an immutable flat slice.
     #[inline]
     #[must_use]
     pub const fn as_slice(&self) -> &[T] {
-        &self.data
+        self.data()
     }
 
     /// Returns a raw const pointer to the first element in the tensor.
     #[inline]
     #[must_use]
     pub const fn as_ptr(&self) -> *const T {
-        self.data.as_ptr()
+        self.data().as_ptr()
     }
 
     /// Returns the underlying row-major data as a mutable flat slice.
     #[inline]
     #[must_use]
     pub const fn as_mut_slice(&mut self) -> &mut [T] {
-        &mut self.data
+        self.data_mut()
     }
 
     /// Returns a raw mutable pointer to the first element in the tensor.
     #[inline]
     #[must_use]
     pub const fn as_mut_ptr(&mut self) -> *mut T {
-        self.data.as_mut_ptr()
+        self.data_mut().as_mut_ptr()
     }
 
     /// Borrows the tensor as an immutable [`TensorView`].
     #[inline]
     pub const fn view(&self) -> TensorView<'_, T, N> {
-        TensorView::new(self.shape, &self.data)
+        // SAFETY: `self.data.len()` matches the product of `self.shape` by `Tensor`'s invariant.
+        unsafe {
+            TensorView::from_raw_parts(self.shape_raw(), NonNull::from_ref(self.as_slice()).cast())
+        }
     }
 
     /// Borrows the tensor as a mutable [`TensorViewMut`].
     #[inline]
     pub const fn view_mut(&mut self) -> TensorViewMut<'_, T, N> {
-        TensorViewMut::new(self.shape, &mut self.data)
+        // SAFETY: `self.data.len()` matches the product of `self.shape` by `Tensor`'s invariant.
+        unsafe {
+            TensorViewMut::from_raw_parts(
+                self.shape_raw(),
+                NonNull::from_mut(self.as_mut_slice()).cast(),
+            )
+        }
     }
 
     /// Consumes and reshapes the owned tensor to rank `M` and `new_shape`
@@ -159,21 +162,20 @@ impl<T, const N: usize> Tensor<T, N> {
     #[inline]
     #[track_caller]
     pub fn reshape<const M: usize>(self, new_shape: [usize; M]) -> Tensor<T, M> {
-        validate_shape(self.len(), &new_shape);
-        Tensor {
-            data: self.data,
-            shape: new_shape,
-        }
+        let shape = validate_shape(self.len(), new_shape);
+        // SAFETY: `validate_shape` verified `shape` does not overflow and matches `self.data.len()`.
+        unsafe { Tensor::from_raw_parts(shape, self.into_data()) }
     }
 
     /// Consumes and flattens the tensor into a 1D [`Vector`] of length
     /// `self.len()`.
     #[inline]
     pub fn flatten(self) -> Vector<T> {
-        Tensor {
-            shape: [self.len()],
-            data: self.data,
-        }
+        // SAFETY: `self.data.len()` equals the product of non-zero dimensions in `self.shape`,
+        // so it is strictly non-zero.
+        let len = unsafe { NonZeroUsize::new_unchecked(self.len()) };
+        // SAFETY: `[len]` has product `self.data.len()`.
+        unsafe { Tensor::from_raw_parts([len], self.into_data()) }
     }
 }
 
@@ -206,7 +208,7 @@ impl<T> Scalar<T> {
     #[must_use]
     pub fn into_scalar(self) -> T {
         // SAFETY: A rank-0 `Scalar` has shape `[]`, which guarantees `self.data.len() == 1`.
-        unsafe { self.data.into_vec().pop().unwrap_unchecked() }
+        unsafe { self.into_vec().pop().unwrap_unchecked() }
     }
 }
 
@@ -215,14 +217,14 @@ impl<T> Matrix<T> {
     #[inline]
     #[must_use]
     pub const fn nrows(&self) -> usize {
-        self.shape[0]
+        self.shape_raw()[0].get()
     }
 
     /// Returns the number of columns (`shape()[1]`) in the matrix.
     #[inline]
     #[must_use]
     pub const fn ncols(&self) -> usize {
-        self.shape[1]
+        self.shape_raw()[1].get()
     }
 }
 
